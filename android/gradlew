@@ -1,0 +1,12 @@
+#!/bin/sh
+if [ -z "$DIRNAME" ]; then
+  DIRNAME=$(dirname "$0")
+fi
+APP_HOME="$DIRNAME"
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+if [ -z "$JAVA_HOME" ]; then
+  JAVACMD=java
+else
+  JAVACMD="$JAVA_HOME/bin/java"
+fi
+exec "$JAVACMD" -Xmx64m -Xms64m -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#FFF8E7" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>SnakeChain.io — Multiplayer Block Combat Arena</title>
+  <meta name="description" content="Play SnakeChain.io online! Customize your block snake chain, slither into massive real-time multiplayer combat, and dominate the global leaderboard." />
+  <meta name="keywords" content="snakechain, snakechain.io, snake game, multiplayer snake, io games, block snake, online combat arena" />
+  <meta property="og:title" content="SnakeChain.io — Multiplayer Block Combat Arena" />
+  <meta property="og:description" content="Build your custom colored snake chain and slither in fast-paced real-time multiplayer combat!" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="SnakeChain.io — Multiplayer Block Combat Arena" />
+  <meta name="twitter:description" content="Build your custom colored snake chain and slither in fast-paced real-time multiplayer combat!" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;700;800;900&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <canvas id="game"></canvas>
+
+    <!-- MENU OVERLAY -->
+    <div id="menu" class="overlay">
+      <div class="menu-backdrop"></div>
+
+      <div class="arcade-deck">
+        <!-- TOP DECK STATUS BAR -->
+        <header class="deck-topbar">
+          <div class="brand-left">
+            <span class="live-pill"><span class="live-dot"></span> LIVE MULTIPLAYER</span>
+            <span class="sticker-tag">★ ONLINE ARENA ★</span>
+          </div>
+          <div class="brand-right">
+            <button id="soundToggle" class="btn-icon" type="button" aria-label="Toggle sound" title="Sound">🔊 SFX</button>
+          </div>
+        </header>
+
+        <!-- 2-COLUMN LANDSCAPE BODY -->
+        <div class="deck-body">
+          <!-- LEFT COLUMN: SNAKE CUSTOMIZER STAGE & PALETTE -->
+          <div class="deck-panel deck-left">
+            <div class="panel-top-bar">
+              <span class="panel-badge">🎨 CUSTOM SKIN CHAIN</span>
+              <span id="chainCount" class="chain-status">TAP COLORS TO EXTEND</span>
+            </div>
+
+            <!-- LIVE FLUID SNAKE STAGE -->
+            <div class="snake-stage">
+              <canvas id="preview" width="400" height="120"></canvas>
+            </div>
+
+            <!-- TACTILE COLOR PALETTE DOCK -->
+            <div class="palette-dock">
+              <div id="swatches" class="swatches-grid"></div>
+              <button id="resetChainBtn" class="btn-redo" type="button">⟲ REDO</button>
+            </div>
+          </div>
+
+          <!-- RIGHT COLUMN: BRAND HERO, PILOT NICKNAME & PLAY NOW -->
+          <div class="deck-panel deck-right">
+            <div class="hero-brand">
+              <h1 class="logo-title">SNAKE<span class="logo-accent">CHAIN</span></h1>
+              <p class="logo-tagline">BLOCK COMBAT ARENA</p>
+            </div>
+
+            <div class="play-action-wrap">
+              <div class="name-field-wrap">
+                <span class="input-tag">PILOT NICKNAME</span>
+                <input id="name" class="input" maxlength="14" placeholder="ENTER YOUR NICKNAME" autocomplete="off" spellcheck="false" />
+              </div>
+
+              <button id="play" class="btn btn-play">
+                <span class="btn-text">PLAY NOW</span>
+                <span class="btn-arrow">➔</span>
+              </button>
+            </div>
+
+            <!-- DESKTOP ARCADE CONTROLS -->
+            <div class="desktop-hints">
+              <div class="hint-pill"><kbd>MOUSE</kbd> STEER</div>
+              <div class="hint-pill boost-hint"><kbd>SPACE</kbd> BOOST</div>
+              <div class="hint-pill lobby-hint"><kbd>ESC</kbd> LOBBY</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONNECTING -->
+    <div id="joining" class="overlay hidden">
+      <div class="panel menu-panel center">
+        <div class="spinner"></div>
+        <h2 class="subtitle">ENTERING ARENA…</h2>
+        <p class="tagline" id="joinNote">FINDING SESSION</p>
+      </div>
+    </div>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+      <!-- TOP LEFT: Small Minimap & Minimal Length -->
+      <div class="hud-top-left">
+        <canvas id="minimap" class="minimap-canvas" width="104" height="104"></canvas>
+        <div id="scoreLen" class="mini-score">0</div>
+      </div>
+
+      <!-- TOP CENTER: Killfeed (User Kills Only) -->
+      <div id="killfeed" class="killfeed"></div>
+
+      <!-- TOP RIGHT: Tiny Top 3 Rank Badge -->
+      <div id="board" class="board">
+        <div class="board-title">RANK</div>
+        <div id="boardRows"></div>
+      </div>
+
+      <!-- JOYSTICK & BOOST BUTTON -->
+      <div id="joystickBase" class="joystick hidden">
+        <div id="joystickThumb" class="joystick-thumb"></div>
+      </div>
+      <button id="boostBtn" class="boost-btn" type="button" aria-label="boost">⚡ BOOST</button>
+    </div>
+
+    <!-- DEATH -->
+    <div id="death" class="overlay hidden">
+      <div class="panel menu-panel center death-panel">
+        <div class="sticker-tag death-sticker">💥 GAME OVER</div>
+        <h2 class="death-title">SNAKE ELIMINATED</h2>
+        <div id="deathKiller" class="death-killer"></div>
+        <div id="deathStats" class="death-stats"></div>
+        <button id="respawn" class="btn btn-play">RESPAWN NOW ➔</button>
+      </div>
+    </div>
+
+    <!-- CONNECTION LOST -->
+    <div id="connLost" class="overlay hidden">
+      <div class="panel menu-panel center">
+        <h2 class="death-title">CONNECTION LOST</h2>
+        <button id="reconnect" class="btn btn-play">RECONNECT ➔</button>
+      </div>
+    </div>
+
+    <!-- ROTATE (portrait phones) -->
+    <div id="rotateHint" class="overlay hidden">
+      <div class="panel menu-panel center">
+        <div class="rotate-icon" aria-hidden="true"></div>
+        <h2 class="subtitle">ROTATE PHONE</h2>
+        <p class="tagline">TURN SIDEWAYS FOR BEST BLOCK VIEW</p>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

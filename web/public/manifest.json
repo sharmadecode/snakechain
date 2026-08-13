@@ -1,0 +1,16 @@
+{
+  "name": "SnakeChain.io — Multiplayer Block Combat Arena",
+  "short_name": "SnakeChain",
+  "description": "Customizable block snake multiplayer arena. Eat blocks, grow long, dominate the arena.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0B0E1F",
+  "theme_color": "#FFF8E7",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
