@@ -8,22 +8,28 @@ export const BOOST_MIN_LENGTH = 45;
 export const BOOST_DROP_INTERVAL_TICKS = 6; // Drop mass pellet every 6 ticks (5 Hz) while boosting
 
 // Circular Arena Radius (Large scalable arena)
-export const ARENA_RADIUS = 3600;
 export const WORLD_HALF = 3600;
 
-// Arena cap: total actors (humans + bots) never exceeds ACTOR_CAP; bots
-// fill the remaining slots up to BOT_MAX. 0 humans -> 12 bots, 50 humans
-// -> 0 bots. Keeps the empty-server case lively without a CPU farm.
+// Arena cap: total actors (humans + bots). Bots fill remaining slots up to
+// BOT_MAX and are despawned only when humans push past ACTOR_CAP - BOT_MAX.
 export const ACTOR_CAP = 400;
 export const BOT_MAX = 20;
 
-// Per-client visibility radius for interest management: must exceed the
-// client's max view half-diagonal (renderer zooms out to 0.64 for huge
-// snakes → ~1802px on 1080p) so nothing pops in at the screen edge.
-export const VIEW_HALF = 1900;
-// Hard cap on a client-reported viewport radius (4K fullscreen at zoom
-// floor 0.64 ≈ 3440). Never trust the client blindly.
+// Per-client interest radius bounds. Clients report their real view
+// half-diagonal at the renderer zoom floor (0.62 — see web render camera
+// clamp): 1080p desktop ≈ 1777 px, 4K ≈ 3553 px, landscape phones ≈ 700–900.
+// The floor keeps sparse regions lively on small screens without forcing
+// phones to download desktop-sized interest sets; the ceiling caps hostile
+// requests. Never trust the client blindly.
+export const VIEW_FLOOR = 800;
 export const VIEW_MAX = 3600;
+
+// Extra world-units added ON TOP of each client's viewport radius when the
+// server decides what to stream (state rows, bodies, food). Guarantees a
+// snake that can physically reach you is already in your client's data
+// before it is on your screen — kills "invisible killer" classes caused by
+// interest-edge flapping or any radius math mismatch between ends.
+export const INTEREST_SAFETY = 200;
 
 // Collision grid stride: sample every 1st body segment for pixel-perfect collision
 export const BODY_SEGMENT_STRIDE = 1;
@@ -45,14 +51,55 @@ export const FOOD_SYNC_MS = 10000;
 export const FOOD_EVENT_BATCH = 6;
 
 export const START_LENGTH = 35;
+// --- follow-the-leader chain physics (see PHASES.md §1) -------------------
+// The body is a chain of segments; px[0] IS the head. Each tick every segment
+// is pulled onto the ring of radius POINT_SPACING around its predecessor
+// whenever it trails farther — loops compact and corners cut like a real snake.
+export const MIN_CHAIN_SEGS = 4;
+export const CHAIN_GROW_PER_TICK = 3;
+// Global growth-rate dial: multiplies every length gain from food (natural
+// pellets, boost drops AND death drops). 0.75 = snakes grow 25% slower than
+// the raw values minted into drops. Single tuning knob by design.
+export const GROWTH_RATE = 0.75;
+// Spawn protection: freshly spawned snakes can't be killed for this window.
+// Eating or boosting breaks it instantly. Kept SHORT (1.2s) — longer windows
+// made freshly-respawned bots unhittable ghosts (“bites don't register”).
+export const SPAWN_PROTECT_MS = 1200;
+// Golden pellet: rarity among NATURAL food spawns, and its mass value.
+export const GOLDEN_CHANCE = 0.01;
+export const GOLDEN_VALUE = 10;
+// --- Battle-Royale collapse (runs ONLY in “collapse”-mode arenas) ---------
+// Main/classic arenas keep the CONSTANT slither-io style map. Collapse rounds:
+// wall steps down ×0.82 every 25s, eases at 90 u/s, floor at halfW 650,
+// 30s endgame hold, #1 crowned CHAMPION, wall re-expands, next round.
+export const BR_SHRINK_INTERVAL_MS = 25_000;
+export const BR_SHRINK_FACTOR = 0.82;
+export const BR_MIN_HALFW = 650;
+export const BR_HOLD_MS = 30_000;
+export const BR_FIRST_DELAY_MS = 40_000;
+export const BR_WALL_SPEED = 90; // world units/sec of eased wall movement
+// ---------------------------------------------------------------------------
+// Bots enter the arena at BOT_START_LENGTH points and can NEVER exceed
+// BOT_MAX_POINTS (enforced in Player.eat). Death drops mint from targetLen,
+// so capping bots also caps corpse windfalls — surplus mass a capped bot eats
+// stays in the world as claimable loot for humans.
+export const BOT_START_LENGTH = 100;
+export const BOT_MAX_POINTS = 500;
+// Body-point array cap. Now the CHAIN SEGMENT cap: MAX_POINTS × POINT_SPACING
+// is the maximum possible snake length, and the adaptive bodyRow() streamer
+// covers every segment within BODY_SAMPLE_CAP samples — no body section can
+// ever be unseen-but-lethal.
+export const MAX_POINTS = 800;
 export const LENGTH_PER_FOOD = 1;
 export const PASSIVE_GROW_PER_SEC = 0;
-export const MAX_POINTS = 3000;
+// remove the old duplicate MAX_POINTS line further down
 
 export const POINT_SPACING = 10;
 export const THICK_MIN = 18;
 export const THICK_MAX = 52;
-export const THICK_GROW_AT = 1600;
+// Thickness curve: maxes out at 800 length-units — early chunkiness by
+// design (giants differentiate via length, not endless width).
+export const THICK_GROW_AT = 800;
 
 // Agility / Turning: small snakes turn sharply, giant snakes turn wider
 export const MIN_TURN_SPEED = 2.8; // rad/s for huge snakes
@@ -68,6 +115,11 @@ export const FOOD_MAX_SPAWN_TRIES = 5;
 // Fresh death drops are invisible to bot grazing for this long, so the
 // killer (or any nearby human) can claim them before the bot swarm does.
 export const FOOD_DROP_BOT_IGNORE_MS = 3500;
+
+// How long a death drop glows on clients (sync rows, batch events and the
+// join snapshot all stamp `isDrop` with the same window). Keep in sync with
+// DEATH_DROP_GLOW_MS in web/src/patterns.ts.
+export const DEATH_DROP_GLOW_MS = 4000;
 
 export const BOT_EYES = 360;
 export const BOT_RESPAWN_MIN_MS = 3500;

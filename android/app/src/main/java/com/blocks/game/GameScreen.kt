@@ -53,7 +53,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -61,12 +60,11 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import kotlin.math.PI
@@ -97,6 +95,10 @@ fun GameScreen(
     connLost: Boolean,
 ) {
     var frame by remember { mutableIntStateOf(0) }
+    // ~4Hz refresh signal for the HUD subtree: recomposing every Text at
+    // 60Hz (via `frame`) was wasted work — only the Canvas needs per-frame.
+    var hudTick by remember { mutableIntStateOf(0) }
+    var rawTicks = 0
     var joystick by remember { mutableStateOf(Joystick()) }
     var boostActive by remember { mutableStateOf(false) }
     var lastInputNanos by remember { mutableLongStateOf(0L) }
@@ -114,16 +116,25 @@ fun GameScreen(
         }
     }
 
-    val rootView = LocalView.current
-    val bottomInset = remember {
-        val root = rootView.rootWindowInsets ?: return@remember 0
-        WindowInsetsCompat.toWindowInsetsCompat(root).getInsets(WindowInsetsCompat.Type.systemBars()).bottom
-    }
+    // Joystick metrics in px derived from dp — raw px made the stick ~half
+    // size on xxhdpi screens. Insets read live via safeDrawing so the ring
+    // clears the navigation bar and any display cutout instead of freezing
+    // at first composition.
+    val safeInsets = WindowInsets.safeDrawing
+    val layoutDir = LocalLayoutDirection.current
+    val bottomInsetPx = { safeInsets.getBottom(density) }
+    val leftInsetPx = { safeInsets.getLeft(density, layoutDir) }
+    val joyMaxR = { with(density) { 70.dp.toPx() } }
+    val joyThumbR = { with(density) { 32.dp.toPx() } }
 
     val ground = remember { makeGround() }
     val groundPaint = remember { Paint().apply { shader = BitmapShader(ground, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT) } }
+    val groundMatrix = remember { android.graphics.Matrix() }
     var vignetteDims by remember { mutableFloatStateOf(0f) }
     val vignettePaint = remember { Paint() }
+
+    // Reused per-frame draw buffers (no steady-state allocation).
+    val sortBuf = remember { ArrayList<PlayerState>(64) }
 
     val namePaint = remember {
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -150,50 +161,53 @@ fun GameScreen(
                 val dt = if (lastNs == 0L) 0.016f else ((ns - lastNs) / 1_000_000_000f).coerceIn(0f, 0.1f)
                 lastNs = ns
 
-                if (state.alive) {
-                    state.update(dt)
+                // The world keeps simulating while dead/joining: other snakes
+                // stay live behind the overlays and the TTL sweep keeps
+                // running (gating on `alive` froze the whole arena).
+                state.update(dt)
 
-                    // Consume death FX to particles
-                    if (state.deathFx.isNotEmpty()) {
-                        for (df in state.deathFx) {
-                            val col = Palette.base(df[2].toInt())
-                            for (i in 0 until 24) {
-                                val a = (i / 24f) * (2 * PI).toFloat() + (Random.nextFloat() - 0.5f) * 0.5f
-                                val sp = 60f + Random.nextFloat() * 240f
-                                if (particles.size < 350) {
-                                    particles.add(
-                                        Particle(
-                                            x = df[0], y = df[1],
-                                            vx = cos(a) * sp, vy = sin(a) * sp,
-                                            life = 0f, max = 0.6f + Random.nextFloat() * 0.4f,
-                                            size = 3f + Random.nextFloat() * 4f, color = col,
-                                        )
-                                    )
-                                }
-                            }
-                        }
-                        state.deathFx.clear()
-                    }
-
-                    // Consume eat FX to particles
-                    if (state.eatenFx.isNotEmpty()) {
-                        for (ef in state.eatenFx) {
-                            val col = Palette.base(ef[2].toInt())
+                // Consume death FX to particles
+                if (state.deathFx.isNotEmpty()) {
+                    for (df in state.deathFx) {
+                        val col = Palette.base(df[2].toInt())
+                        for (i in 0 until 24) {
+                            val a = (i / 24f) * (2 * PI).toFloat() + (Random.nextFloat() - 0.5f) * 0.5f
+                            val sp = 60f + Random.nextFloat() * 240f
                             if (particles.size < 350) {
                                 particles.add(
                                     Particle(
-                                        x = ef[0], y = ef[1],
-                                        vx = (Random.nextFloat() - 0.5f) * 80f,
-                                        vy = -60f - Random.nextFloat() * 80f,
-                                        life = 0f, max = 0.35f,
-                                        size = 2.5f + Random.nextFloat() * 2f, color = col,
+                                        x = df[0], y = df[1],
+                                        vx = cos(a) * sp, vy = sin(a) * sp,
+                                        life = 0f, max = 0.6f + Random.nextFloat() * 0.4f,
+                                        size = 3f + Random.nextFloat() * 4f, color = col,
                                     )
                                 )
                             }
                         }
-                        state.eatenFx.clear()
                     }
+                    state.deathFx.clear()
+                }
 
+                // Consume eat FX to particles
+                if (state.eatenFx.isNotEmpty()) {
+                    for (ef in state.eatenFx) {
+                        val col = Palette.base(ef[2].toInt())
+                        if (particles.size < 350) {
+                            particles.add(
+                                Particle(
+                                    x = ef[0], y = ef[1],
+                                    vx = (Random.nextFloat() - 0.5f) * 80f,
+                                    vy = -60f - Random.nextFloat() * 80f,
+                                    life = 0f, max = 0.35f,
+                                    size = 2.5f + Random.nextFloat() * 2f, color = col,
+                                )
+                            )
+                        }
+                    }
+                    state.eatenFx.clear()
+                }
+
+                if (state.alive) {
                     val ang = if (joystick.active && joystick.vec.getDistance() > 14f) {
                         kotlin.math.atan2(joystick.vec.y, joystick.vec.x).toFloat()
                     } else null
@@ -216,11 +230,17 @@ fun GameScreen(
                         val a = ((lastAngle * 1000).toInt()) / 1000f
                         net.send(JSONObject().put("t", "input").put("a", a.toDouble()).put("b", boostActive))
                     }
+
+                    // Local boost flag drives the spark trail (the server's
+                    // state row always reports boost=0).
+                    state.getSelf()?.boost = boostActive
                 } else {
                     boostActive = false
                 }
                 updateParticles(particles, dt)
                 frame++
+                rawTicks++
+                if (rawTicks % 15 == 0) hudTick++
             }
         }
     }
@@ -239,8 +259,9 @@ fun GameScreen(
             .fillMaxSize()
             .background(Color(0xFF080B18))
             .pointerInput(Unit) {
-                val joyX = with(density) { 100.dp.toPx() }
-                val joyY = size.height - with(density) { 96.dp.toPx() } - bottomInset
+                val joyX = with(density) { 100.dp.toPx() } + leftInsetPx()
+                val joyY = size.height - with(density) { 96.dp.toPx() } - bottomInsetPx()
+                val maxR = joyMaxR()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (state.alive && down.position.x < size.width * 0.55f) {
@@ -253,7 +274,6 @@ fun GameScreen(
                             val dx = change.position.x - joyX
                             val dy = change.position.y - joyY
                             val len = hypot(dx, dy)
-                            val maxR = 70f
                             joystick = if (len > maxR) {
                                 Joystick(base, Offset(dx / len * maxR, dy / len * maxR), true)
                             } else {
@@ -278,10 +298,9 @@ fun GameScreen(
             val sx = { wx: Float -> (wx - camX) * zoom + w / 2 }
             val sy = { wy: Float -> (wy - camY) * zoom + h / 2 }
 
-            // 1. Arena Ground Grid
-            val groundMatrix = android.graphics.Matrix().apply {
-                setTranslate(-(camX * zoom % 256f), -(camY * zoom % 256f))
-            }
+            // 1. Arena Ground Grid (reused Matrix — one object per frame was churn)
+            groundMatrix.reset()
+            groundMatrix.setTranslate(-(camX * zoom % 256f), -(camY * zoom % 256f))
             groundPaint.shader?.setLocalMatrix(groundMatrix)
             drawContext.canvas.nativeCanvas.drawRect(0f, 0f, w, h, groundPaint)
 
@@ -293,17 +312,20 @@ fun GameScreen(
             // 3. Glowing Food Orbs
             drawFood(state, viewR, camX, camY, sx, sy, zoom, sharedPaint)
 
-            // 4. Snake Bodies (depth sorted by length)
-            val sorted = state.players.values.sortedBy { it.len }
-            for (pl in sorted) {
-                if (hypot(pl.x - camX, pl.y - camY) > viewR) continue
+            // 4. Snake Bodies (depth sorted by length; reused buffer)
+            sortBuf.clear()
+            sortBuf.addAll(state.players.values)
+            sortBuf.sortBy { it.len }
+            val viewR2 = viewR * viewR
+            for (pl in sortBuf) {
+                if (!snakeInView(pl, camX, camY, viewR2)) continue
                 drawSlitherBody(pl, sx, sy, zoom, sharedPaint)
             }
 
             // 5. Snake Heads & Googly Eyes
             val leaderId = if (state.leaderboard.isNotEmpty()) state.leaderboard[0].optInt(0, -1) else -1
-            for (pl in sorted) {
-                if (hypot(pl.x - camX, pl.y - camY) > viewR) continue
+            for (pl in sortBuf) {
+                if (!snakeInView(pl, camX, camY, viewR2)) continue
                 drawSlitherHead(pl, sx, sy, zoom, pl.id == state.myId, pl.id == leaderId, namePaint, nameStroke, sharedPaint)
 
                 // Boost spark trail
@@ -343,22 +365,24 @@ fun GameScreen(
             drawContext.canvas.nativeCanvas.drawRect(0f, 0f, w, h, vignettePaint)
 
             // 8. Virtual Joystick
-            val joyX = with(density) { 100.dp.toPx() }
-            val joyY = h - with(density) { 96.dp.toPx() } - bottomInset
+            val joyX = with(density) { 100.dp.toPx() } + leftInsetPx()
+            val joyY = h - with(density) { 96.dp.toPx() } - bottomInsetPx()
+            val jR = joyMaxR()
+            val tR = joyThumbR()
             drawCircle(
-                Color(0x3300D2FF), 70f, Offset(joyX, joyY),
+                Color(0x3300D2FF), jR, Offset(joyX, joyY),
                 style = androidx.compose.ui.graphics.drawscope.Stroke(4f),
             )
             if (joystick.active) {
-                drawCircle(Color(0xFF00D2FF), 32f, Offset(joyX, joyY) + joystick.vec)
-                drawCircle(Color(0xFFFFFFFF), 32f, Offset(joyX, joyY) + joystick.vec, style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
+                drawCircle(Color(0xFF00D2FF), tR, Offset(joyX, joyY) + joystick.vec)
+                drawCircle(Color(0xFFFFFFFF), tR, Offset(joyX, joyY) + joystick.vec, style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
             }
         }
 
         HUD(
             state = state,
             killfeed = killfeed,
-            frame = frame,
+            refresh = hudTick,
             boostActive = boostActive,
             onBoostChange = {
                 if (state.alive) {
@@ -394,7 +418,7 @@ fun GameScreen(
 private fun HUD(
     state: GameState,
     killfeed: List<KfEntry>,
-    frame: Int,
+    refresh: Int,
     boostActive: Boolean,
     onBoostChange: (Boolean) -> Unit,
     onQuit: () -> Unit,
@@ -404,7 +428,7 @@ private fun HUD(
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
-        val f = frame
+        val f = refresh
         if (f < 0) return@Box
 
         // Top Left: Small Minimap & Minimal Length
@@ -423,7 +447,7 @@ private fun HUD(
                     .background(Color(0xFFFFF8E7))
                     .border(2.dp, Color(Palette.INK), CircleShape)
             ) {
-                Minimap(state)
+                Minimap(state, refresh)
             }
             if (self != null) {
                 Box(
@@ -536,8 +560,9 @@ private fun HUD(
 }
 
 @Composable
-private fun Minimap(state: GameState) {
+private fun Minimap(state: GameState, refresh: Int) {
     Canvas(Modifier.fillMaxSize()) {
+        if (refresh < 0) return@Canvas // keep the refresh param read live
         val cx = size.width / 2f
         val cy = size.height / 2f
         val radarR = size.width / 2f - 3f
@@ -595,33 +620,6 @@ private fun BoostButton(active: Boolean, onBoostChange: (Boolean) -> Unit) {
             fontWeight = FontWeight.Black,
             letterSpacing = 1.sp,
         )
-    }
-}
-
-@Composable
-private fun SlitherChip(text: String, color: Color) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xCC0C1020))
-            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    ) {
-        Text(text, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun SlitherButton(text: String, onClick: () -> Unit) {
-    Box(
-        Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color(0xCC0C1020))
-            .border(1.dp, Color(0x4400D2FF), RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-    ) {
-        Text(text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Black)
     }
 }
 
@@ -722,6 +720,18 @@ private fun ConnLostOverlay(onReconnect: () -> Unit, onQuit: () -> Unit) {
                 ) {
                     Text("RECONNECT", color = Color(0xFF080B18), fontSize = 15.sp, fontWeight = FontWeight.Black)
                 }
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .border(1.dp, Color(0x66FFFFFF), RoundedCornerShape(10.dp))
+                        .clickable(onClick = onQuit)
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("QUIT TO MENU", color = Color(0xCCFFFFFF), fontSize = 13.sp, fontWeight = FontWeight.Black)
+                }
             }
         }
     }
@@ -746,6 +756,35 @@ private fun makeGround(): Bitmap {
     val c = android.graphics.Canvas(bmp)
     c.drawColor(AColor.rgb(11, 19, 41)) // Solid plain dark blue playfield
     return bmp
+}
+
+/**
+ * View test covering the snake's FULL extent: head, local path, and the
+ * authoritative body samples. A long snake whose head is off-screen can
+ * still have its body crossing the view — and that body is lethal
+ * (server collision is authoritative). Culling by head alone rendered
+ * such snakes invisible while they could still kill you.
+ */
+private fun snakeInView(pl: PlayerState, camX: Float, camY: Float, viewR2: Float): Boolean {
+    val dxh = pl.x - camX
+    val dyh = pl.y - camY
+    if (dxh * dxh + dyh * dyh <= viewR2) return true
+    var i = 0
+    while (i < pl.px.size) {
+        val dx = pl.px[i] - camX
+        val dy = pl.py[i] - camY
+        if (dx * dx + dy * dy <= viewR2) return true
+        i += 6
+    }
+    val b = pl.body ?: return false
+    i = 0
+    while (i + 1 < b.size) {
+        val dx = b[i] - camX
+        val dy = b[i + 1] - camY
+        if (dx * dx + dy * dy <= viewR2) return true
+        i += 12
+    }
+    return false
 }
 
 private fun updateParticles(list: MutableList<Particle>, dt: Float) {
@@ -864,6 +903,10 @@ private fun DrawScope.drawSlitherBody(
     // Pre-calculate spine block positions stepping from head to tail with tight overlapping steps
     class SpineBlock(val wx: Float, val wy: Float, val angle: Float, val size: Float, val blockIdx: Int)
     val blocks = ArrayList<SpineBlock>(200)
+    // Resolve the color cycle once per snake (per-block unpack was hundreds
+    // of IntArray allocations per frame).
+    val cycle = Palette.unpack(pl.colorIdx)
+    val nCol = if (cycle.isNotEmpty()) cycle.size else 1
     var curD = max(4f, blockSize * 0.38f)
     var bIdx = 1
     var j = 0
@@ -900,7 +943,7 @@ private fun DrawScope.drawSlitherBody(
         val curHalf = blk.size / 2f
         val discX = sx(blk.wx)
         val discY = sy(blk.wy)
-        val col = Palette.getBlockColor(pl.colorIdx, blk.blockIdx)
+        val col = Palette.base(cycle[((blk.blockIdx % nCol) + nCol) % nCol])
 
         native.save()
         native.translate(discX, discY)
@@ -935,7 +978,7 @@ private fun DrawScope.drawSlitherHead(
     val hy = sy(pl.y)
     val headSize = pl.thick * 1.15f * zoom
     val halfHead = headSize / 2f
-    val headCol = Palette.getBlockColor(pl.colorIdx, 0)
+    val headCol = Palette.base(Palette.unpack(pl.colorIdx).firstOrNull() ?: 0)
     val native = drawContext.canvas.nativeCanvas
 
     native.save()

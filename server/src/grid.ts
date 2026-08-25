@@ -6,8 +6,9 @@ const MUL = 16384;
  * spawn/eat time (it never moves); body segments are replaced per player
  * every tick via segmentCells + insertInto/removeFrom using cell lists
  * recorded on the entry, so nothing is ever rebuilt from scratch. Cell
- * index math is exact for coordinates in [-2048, 2048] which exceeds the
- * maximum world size.
+ * index math via key() stays collision-free while |cell coord| < SHIFT
+ * (=4096); the arena (±3600 world units / 48-unit cells ≈ ±75 cells) fits
+ * with a huge margin.
  */
 export class Grid<T> {
   readonly cell: number;

@@ -1,14 +1,20 @@
 export type MsgHandler = (msg: Record<string, unknown>) => void;
+/** Close-code-aware disconnect callback (1013 = server/arena full). */
+export type CloseHandler = (code: number) => void;
+
+/** How long a CONNECTING socket may hang before we treat it as dead. */
+const CONNECT_TIMEOUT_MS = 8000;
 
 export class Net {
   url: string;
   onMsg: MsgHandler;
-  onClose: () => void;
   onOpen: () => void;
+  onClose: CloseHandler;
   private ws: WebSocket | null = null;
   private pingTimer: number | null = null;
+  private connectTimer: number | null = null;
 
-  constructor(url: string, onMsg: MsgHandler, onOpen: () => void, onClose: () => void) {
+  constructor(url: string, onMsg: MsgHandler, onOpen: () => void, onClose: CloseHandler) {
     this.url = url;
     this.onMsg = onMsg;
     this.onOpen = onOpen;
@@ -16,32 +22,53 @@ export class Net {
   }
 
   connect(): void {
+    // Supersede any previous socket first: overwriting the reference without
+    // closing leaks the old socket AND lets its late handlers (onclose in
+    // particular) clobber the fresh connection's state.
+    this.destroySocket();
+
+    let ws: WebSocket;
     try {
-      this.ws = new WebSocket(this.url);
+      ws = new WebSocket(this.url);
     } catch {
-      this.onClose();
+      this.onClose(1006); // abnormal closure — construction failed synchronously
       return;
     }
-    this.ws.onopen = () => {
+    this.ws = ws;
+
+    this.connectTimer = window.setTimeout(() => {
+      // Server accepted TCP but never completed the handshake — abort so the
+      // UI can show an error instead of hanging on "ENTERING ARENA…" forever.
+      if (ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    }, CONNECT_TIMEOUT_MS);
+
+    ws.onopen = () => {
+      if (this.ws !== ws) return; // superseded while connecting
+      this.clearConnectTimer();
       this.onOpen();
+      this.clearPingTimer();
       this.pingTimer = window.setInterval(() => this.send({ t: "ping", n: Date.now() }), 5000);
     };
-    this.ws.onmessage = (ev) => {
+    ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       try {
         const msg = JSON.parse(String(ev.data)) as Record<string, unknown>;
         this.onMsg(msg);
       } catch {
-        /* ignore malformed frames */
+        if (import.meta.env.DEV) console.warn("[net] malformed frame dropped");
       }
     };
-    this.ws.onclose = () => {
-      if (this.pingTimer !== null) clearInterval(this.pingTimer);
-      this.pingTimer = null;
-      this.onClose();
+    ws.onclose = (ev) => {
+      if (this.ws !== ws) return; // a stale socket closed; the live one is fine
+      this.destroySocket();
+      this.onClose(ev.code);
     };
-    this.ws.onerror = () => {
+    ws.onerror = () => {
+      if (this.ws !== ws) return;
       try {
-        this.ws?.close();
+        ws.close();
       } catch {
         /* noop */
       }
@@ -55,14 +82,41 @@ export class Net {
   }
 
   close(): void {
+    this.destroySocket();
+  }
+
+  get open(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  private destroySocket(): void {
+    this.clearPingTimer();
+    this.clearConnectTimer();
+    const ws = this.ws;
+    this.ws = null;
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
     try {
-      this.ws?.close();
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
     } catch {
       /* noop */
     }
   }
 
-  get open(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+  private clearPingTimer(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
   }
 }

@@ -94,9 +94,11 @@ const analyze = (samples, label) => {
   return { mean, cv: std / mean, slowFrames, total: speeds.length, bursts, meanErr };
 };
 
-// Boost only counts while the snake is above the boost floor (100 len);
-// below it the server drops to base speed, which would pollute the boost
-// metrics. Gate the boost analysis on len > floor + 4.
+// Boost only counts while the snake is above the boost floor (45 len —
+// BOOST_MIN_LENGTH in server/src/config.ts; keep in sync). Below it the
+// server drops to base speed, polluting boost metrics. Gate analysis on
+// len > floor + 5.
+const BOOST_FLOOR = 45;
 const boostStats = (samples) => {
   const speeds = [];
   let segStart = 0;
@@ -104,7 +106,7 @@ const boostStats = (samples) => {
     const dt = (samples[i].t - samples[i - 1].t) / 1000;
     const jump = Math.hypot(samples[i].x - samples[i - 1].x, samples[i].y - samples[i - 1].y);
     if (jump > 80) segStart = i;
-    if (dt > 0.01 && dt < 0.25 && i > segStart && samples[i].len > 104 && samples[i - 1].len > 104) {
+    if (dt > 0.01 && dt < 0.25 && i > segStart && samples[i].len > BOOST_FLOOR + 5 && samples[i - 1].len > BOOST_FLOOR + 5) {
       speeds.push(jump / dt);
     }
   }
@@ -116,7 +118,7 @@ const boostStats = (samples) => {
 };
 
 await page.mouse.move(640, 400);
-await page.mouse.down(); // hold boost — server must ignore it below 100 len
+await page.mouse.down(); // hold boost — server ignores it below BOOST_FLOOR (45)
 
 // Boost is locked while the snake is small: measure ~2s of motion and
 // assert it stays at base speed, not boost speed.
@@ -136,11 +138,12 @@ for (let attempt = 0; attempt < 3; attempt++) {
   if (Number.isFinite(growth.mean) && growth.total > 10) break;
   await respawnIfDead(); // died mid-collect — respawn and retry
 }
-  check("boost-locked-below-100", growth.mean > 100 && growth.mean < 250, `avg=${growth.mean.toFixed(1)}`);
+  check("boost-locked-below-floor", growth.mean > 100 && growth.mean < 250, `avg=${growth.mean.toFixed(1)}`);
 
-// Release boost for the growth phase: held boost drains 20 len/s against
-// passive growth of 2/s, which pins the snake at the 100-len boost floor
-// and it never grows to the ~180 needed for a clean boost window.
+// Release boost for the growth phase: held boost drains 6 len/s
+// (BOOST_DRAIN_PER_SEC) and there is NO passive growth (PASSIVE_GROW_PER_SEC
+// = 0) — the snake only grows by eating, so held boost would pin it at the
+// boost floor forever.
 await page.mouse.up();
 
 // While the snake passively grows (2/s + food), measure the bots — they
@@ -164,12 +167,11 @@ if (bots.length) {
   console.log("bot: none in arena");
 }
 
-// Grow to comfortably above the boost floor so the boost phase lasts
-// (drain is 20/s, so from ~180 the boost window is ~4s). The snake grows
-// by eating, so steer the mouse toward the nearest food (the camera is
-// centered on self at zoom ~1.15). A tiny snake dies often — respawn and
-// keep going.
-const deadline = Date.now() + 150000;
+// Grow to comfortably above the boost floor so the boost phase lasts.
+// Held boost drains 6 len/s (BOOST_DRAIN_PER_SEC) and there is NO passive
+// growth (PASSIVE_GROW_PER_SEC = 0) — the snake only grows by eating, so
+// held boost would pin it at the boost floor forever.
+const deadline = Date.now() + 240000;
 let grew = false;
 let ticks = 0;
 let aliveTicks = 0;
@@ -178,7 +180,7 @@ while (Date.now() < deadline) {
     const s = window.__state;
     const p = s && s.players.get(s.myId);
     if (!p) return { len: 0, mx: 0, my: 0, alive: false };
-    const zoom = Math.max(0.45, Math.min(1.15, 1.15 - p.len / 3500));
+    const zoom = Math.max(0.62, Math.min(1.55, 1.55 - p.len / 3200));
     let best = null;
     let bd = Infinity;
     for (const f of s.food.values()) {

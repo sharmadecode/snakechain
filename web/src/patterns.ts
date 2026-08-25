@@ -19,6 +19,11 @@ export const PALETTE: readonly string[] = [
 export const INK = "#141414";
 export const CREAM = "#FFF8E7";
 
+/** How long a death drop glows after spawning. Must match
+ *  DEATH_DROP_GLOW_MS in server/src/config.ts (server stamps `isDrop`
+ *  with the same window in sync rows, batch events and join snapshots). */
+export const DEATH_DROP_GLOW_MS = 4000;
+
 export function baseColor(idx: number): string {
   const i = ((idx % PALETTE.length) + PALETTE.length) % PALETTE.length;
   return PALETTE[i]!;
@@ -27,9 +32,16 @@ export function baseColor(idx: number): string {
 /**
  * Unpacks a packed number into an array of color indices [0..11], length 1..8.
  * Format: Lowest nibble is count (N in 1..8). Next N nibbles are the color indices.
- * Backward compatible with legacy single color or 5-color packs.
+ * Backward compatible with legacy single color or countless 5-color packs.
+ *
+ * Ambiguity note: canonical chain [0] encodes to integer 1, inside the legacy
+ * single range — value 1 is therefore DEFINED as canonical [0] (pure yellow
+ * head). Server mirror lives in server/src/colors.ts; keep in sync.
  */
 export function unpackColors(packed: number): number[] {
+  if (packed === 1) {
+    return [0];
+  }
   if (packed < 12) {
     return [packed];
   }
@@ -64,21 +76,6 @@ export function packColors(colors: number[]): number {
     p += c * Math.pow(16, i + 1);
   }
   return p;
-}
-
-/** Get color for the nth square block in the chain (repeats through the N colors) */
-export function getBlockColor(packed: number, blockIdx: number): string {
-  const colors = unpackColors(packed);
-  const n = colors.length || 1;
-  const slot = ((blockIdx % n) + n) % n;
-  return baseColor(colors[slot]!);
-}
-
-export function getBlockColorIdx(packed: number, blockIdx: number): number {
-  const colors = unpackColors(packed);
-  const n = colors.length || 1;
-  const slot = ((blockIdx % n) + n) % n;
-  return colors[slot]!;
 }
 
 /** Neo-brutalism shade helper (light bevel or dark hard shadow) */

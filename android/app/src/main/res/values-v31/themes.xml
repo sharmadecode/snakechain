@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Blocks" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowSplashScreenBackground">#0B0E1F</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+    </style>
+</resources>

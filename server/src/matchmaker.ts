@@ -2,23 +2,31 @@ import { Session } from "./session.js";
 import { ACTOR_CAP, BOT_MAX } from "./config.js";
 
 /**
- * Single persistent arena: one world, no session splitting. Seeded at boot
- * with food + a bot population that FILLS the actor cap: `bots = min(BOT_MAX,
- * ACTOR_CAP - humans)`. 0 humans -> 12 bots; 50 humans -> 0 bots. This keeps
- * the empty-server case lively without turning it into a CPU farm.
+ * Dual persistent arenas on ONE server process:
+ *   - "classic": constant slither-io style map (the main mode)
+ *   - "br":      Battle-Royale collapse rounds
+ * Clients pick a mode at join; each arena keeps its own bot population so
+ * both stay lively. Health endpoint aggregates both.
  */
 export class Matchmaker {
-  private arena: Session;
+  readonly classic: Session;
+  readonly br: Session;
 
   constructor() {
-    this.arena = new Session();
-    this.arena.start();
-    this.adjust(this.arena);
-    console.log(`[sessions] opened arena ${this.arena.id} (halfW=${this.arena.halfW})`);
+    this.classic = new Session("classic");
+    this.br = new Session("br");
+    this.classic.start();
+    this.br.start();
+    this.adjust(this.classic);
+    this.adjust(this.br);
+    console.log(
+      `[sessions] opened arenas: ${this.classic.id} + ${this.br.id}`,
+    );
   }
 
-  getArena(): Session {
-    return this.arena;
+  /** Route a join to the requested arena ("br" | anything else = classic). */
+  getArena(mode: unknown): Session {
+    return mode === "br" ? this.br : this.classic;
   }
 
   onHumanJoined(s: Session): void {
@@ -31,5 +39,24 @@ export class Matchmaker {
 
   private adjust(s: Session): void {
     s.adjustBots(Math.min(BOT_MAX, Math.max(0, ACTOR_CAP - s.humans.size)));
+  }
+
+  /** Aggregated health for /health, with per-arena detail for diagnostics. */
+  healthStats() {
+    const c = this.classic.healthStats();
+    const b = this.br.healthStats();
+    return {
+      humans: c.humans + b.humans,
+      bots: c.bots + b.bots,
+      alive: c.alive + b.alive,
+      food: c.food + b.food,
+      tickErrStreak: Math.max(c.tickErrStreak, b.tickErrStreak),
+      tickMsAvg:
+        c.tickMsAvg >= 0 || b.tickMsAvg >= 0
+          ? Math.max(c.tickMsAvg, b.tickMsAvg)
+          : -1,
+      sinceLastTickMs: Math.max(c.sinceLastTickMs, b.sinceLastTickMs),
+      arenas: { classic: c, br: b },
+    };
   }
 }

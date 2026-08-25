@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "description": "SnakeChain.io - Authoritative multiplayer game server",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "node --max-old-space-size=400 dist/src/server.js",
     "build": "tsc",
-    "stress": "tsx test/stress.ts"
+    "stress": "tsx test/stress.ts",
+    "test:unit": "tsx test/colors.test.ts"
   },
   "dependencies": {
     "ws": "^8.18.0"

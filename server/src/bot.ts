@@ -2,22 +2,23 @@ import {
   BASE_SPEED,
   BOT_EYES, BOT_NAMES, NUM_COLORS, NUM_PATTERNS,
   BOT_RESPAWN_MIN_MS, BOT_RESPAWN_MAX_MS,
+  POINT_SPACING,
 } from "./config.js";
 import { Player } from "./player.js";
 import { angleDiff, clamp, dist2, normAngle } from "./vec.js";
+import { packChain } from "./colors.js";
 
 export interface BotContext {
   alivePlayers: Player[];
   getHalfW(): number;
   getHalfH(): number;
   /** Nearest food within `radius` via the collision grid — never a
-      full-map scan (60 bots × thousands of items would be millions of
-      distance checks/sec). */
+      full-map scan (BOT_MAX bots × thousands of items would be heavy
+      otherwise). */
   findFood(x: number, y: number, radius: number): { x: number; y: number } | null;
 }
 
 const BODY_CLEAR = 185;
-const WALL_MARGIN = 120;
 
 export class Bot extends Player {
   private decideAt = 0;
@@ -40,7 +41,10 @@ export class Bot extends Player {
     const c2 = (c1 + 1 + Math.floor(Math.random() * (NUM_COLORS - 1))) % NUM_COLORS;
     const c3 = (c2 + 1 + Math.floor(Math.random() * (NUM_COLORS - 1))) % NUM_COLORS;
     const c4 = (c3 + 1 + Math.floor(Math.random() * (NUM_COLORS - 1))) % NUM_COLORS;
-    const packed = c0 + c1 * 16 + c2 * 256 + c3 * 4096 + c4 * 65536;
+    // Canonical count-nibble format (see colors.ts) — the client's
+    // unpackColors reads nibble 0 as the chain length, so packing raw
+    // nibbles here would corrupt most bot skins.
+    const packed = packChain([c0, c1, c2, c3, c4]);
     super(name, packed, Math.floor(Math.random() * NUM_PATTERNS), true);
   }
 
@@ -167,6 +171,21 @@ export class Bot extends Player {
     for (const p of ctx.alivePlayers) {
       if (p === this || !p.alive) continue;
       const radius = p.id === this.preyId ? preyClear : clear;
+      // Bounding-circle early-out: every body point lies within
+      // px.length * POINT_SPACING of the head, and the predicted-head probe
+      // below leads by at most 300*caution units. If neither bubble can
+      // reach us, skip the whole walk — identical decisions, far fewer
+      // distance checks in crowded arenas.
+      const hd2 = dist2(this.x, this.y, p.x, p.y);
+      const bodyReach = radius + p.px.length * POINT_SPACING;
+      const canPredictHead =
+        p.id !== this.preyId && p.targetLen > this.targetLen * 1.2;
+      if (
+        hd2 > bodyReach * bodyReach &&
+        !(canPredictHead && hd2 <= (300 * this.caution + p.px.length * POINT_SPACING) ** 2)
+      ) {
+        continue;
+      }
       const rr = radius * radius;
       const stride = p.px.length > 300 ? 6 : 3;
       for (let i = 0; i < p.px.length; i += stride) {

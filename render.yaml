@@ -1,0 +1,25 @@
+# Render.com deployment template — single Node service serving the built
+# client (web/dist) AND the WebSocket (/ws). Adjust branch/region as needed.
+services:
+  - type: web
+    name: snakechain
+    env: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm --prefix web install && npm --prefix web run build && npm --prefix server install && npm --prefix server run build
+    startCommand: npm --prefix server start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # REQUIRED behind Render's proxy: without it every client shares the
+      # proxy IP and MAX_PER_IP locks everyone out after a few connections.
+      - key: TRUST_PROXY
+        value: "1"
+      - key: NODE_VERSION
+        value: "22"
+      # Optional hardening:
+      # - key: ALLOWED_ORIGINS
+      #   value: https://your-domain.onrender.com
+      # - key: HTTPS
+      #   value: "1"   # adds HSTS; Render terminates TLS at the edge

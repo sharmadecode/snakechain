@@ -2,9 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="theme-color" content="#FFF8E7" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0B1129" />
   <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="apple-touch-icon" href="/icons/icon-192.png" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -14,13 +15,17 @@
   <meta property="og:title" content="SnakeChain.io — Multiplayer Block Combat Arena" />
   <meta property="og:description" content="Build your custom colored snake chain and slither in fast-paced real-time multiplayer combat!" />
   <meta property="og:type" content="website" />
+  <meta property="og:image" content="/icons/icon-512.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="SnakeChain.io — Multiplayer Block Combat Arena" />
   <meta name="twitter:description" content="Build your custom colored snake chain and slither in fast-paced real-time multiplayer combat!" />
+  <meta name="twitter:image" content="/icons/icon-512.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;700;800;900&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css" />
+  <!-- styles.css is bundled + content-hashed by Vite (imported in main.ts):
+       the SW's cache-first asset rule previously pinned this UNhashed URL
+       forever, serving stale CSS after every deploy. -->
 </head>
 <body>
   <div id="app">
@@ -34,59 +39,83 @@
         <!-- TOP DECK STATUS BAR -->
         <header class="deck-topbar">
           <div class="brand-left">
-            <span class="live-pill"><span class="live-dot"></span> LIVE MULTIPLAYER</span>
-            <span class="sticker-tag">★ ONLINE ARENA ★</span>
+            <span id="livePill" class="live-pill"><span class="live-dot"></span>LIVE</span>
+            <span id="onlineCount" class="online-pill" title="Players in the arena right now">— IN ARENA</span>
           </div>
           <div class="brand-right">
             <button id="soundToggle" class="btn-icon" type="button" aria-label="Toggle sound" title="Sound">🔊 SFX</button>
           </div>
         </header>
 
-        <!-- 2-COLUMN LANDSCAPE BODY -->
+        <!-- HERO: THE CHAIN ITSELF -->
+        <div class="hero-brand">
+          <h1 class="logo-title" aria-label="SnakeChain">
+            <span class="logo-word" aria-hidden="true"><i style="--d:0">S</i><i style="--d:1">N</i><i style="--d:2">A</i><i style="--d:3">K</i><i style="--d:4">E</i></span><span class="logo-accent" aria-hidden="true"><i style="--d:5">C</i><i style="--d:6">H</i><i style="--d:7">A</i><i style="--d:8">I</i><i style="--d:9">N</i></span>
+          </h1>
+          <p class="logo-tagline">GROW YOUR CHAIN · CUT OFF THE REST</p>
+        </div>
+
         <div class="deck-body">
-          <!-- LEFT COLUMN: SNAKE CUSTOMIZER STAGE & PALETTE -->
+          <!-- LEFT COLUMN: CHAIN FORGE -->
           <div class="deck-panel deck-left">
             <div class="panel-top-bar">
-              <span class="panel-badge">🎨 CUSTOM SKIN CHAIN</span>
+              <span class="panel-badge">⛓️ CUSTOMIZE YOUR CHAIN</span>
               <span id="chainCount" class="chain-status">TAP COLORS TO EXTEND</span>
             </div>
 
-            <!-- LIVE FLUID SNAKE STAGE -->
+            <!-- LIVE SLITHERING PREVIEW STAGE -->
             <div class="snake-stage">
               <canvas id="preview" width="400" height="120"></canvas>
+              <div class="stage-sheen" aria-hidden="true"></div>
             </div>
 
-            <!-- TACTILE COLOR PALETTE DOCK -->
+            <!-- CHAIN SLOT STRIP (filled links + empty slots) -->
+            <div id="chainSlots" class="chain-slots" aria-hidden="true"></div>
+
+            <!-- PALETTE DOCK + CHAIN ACTIONS -->
             <div class="palette-dock">
               <div id="swatches" class="swatches-grid"></div>
-              <button id="resetChainBtn" class="btn-redo" type="button">⟲ REDO</button>
+              <div class="dock-actions">
+                <button id="undoChainBtn" class="btn-mini" type="button" title="Remove the last link">↩ UNDO</button>
+                <button id="shuffleChainBtn" class="btn-mini" type="button" title="Random chain">🎲 SHUFFLE</button>
+                <button id="resetChainBtn" class="btn-mini danger" type="button" title="Reset to head only">⟲ RESET</button>
+              </div>
             </div>
+
+            <!-- PATTERN PICKER (rendered by ui.renderPatternRow) -->
+            <div id="patternRow" class="pattern-row" role="radiogroup" aria-label="Skin pattern"></div>
           </div>
 
-          <!-- RIGHT COLUMN: BRAND HERO, PILOT NICKNAME & PLAY NOW -->
+          <!-- RIGHT COLUMN: NICKNAME & PLAY -->
           <div class="deck-panel deck-right">
-            <div class="hero-brand">
-              <h1 class="logo-title">SNAKE<span class="logo-accent">CHAIN</span></h1>
-              <p class="logo-tagline">BLOCK COMBAT ARENA</p>
-            </div>
-
             <div class="play-action-wrap">
               <div class="name-field-wrap">
                 <span class="input-tag">PILOT NICKNAME</span>
-                <input id="name" class="input" maxlength="14" placeholder="ENTER YOUR NICKNAME" autocomplete="off" spellcheck="false" />
+                <input id="name" class="input" maxlength="14" placeholder="ENTER YOUR NICKNAME" autocomplete="off" spellcheck="false" aria-describedby="nameError" />
+                <p id="nameError" class="name-error hidden" role="alert">ENTER A NICKNAME TO PLAY</p>
               </div>
+
+              <div id="modeRow" class="pattern-row mode-row" role="radiogroup" aria-label="Game mode"></div>
 
               <button id="play" class="btn btn-play">
                 <span class="btn-text">PLAY NOW</span>
                 <span class="btn-arrow">➔</span>
               </button>
+
+              <!-- Lifetime progression strip (hidden until first game) -->
+              <div id="menuStats" class="menu-stats" aria-live="polite"></div>
             </div>
 
-            <!-- DESKTOP ARCADE CONTROLS -->
+            <!-- CONTROL HINTS -->
             <div class="desktop-hints">
               <div class="hint-pill"><kbd>MOUSE</kbd> STEER</div>
               <div class="hint-pill boost-hint"><kbd>SPACE</kbd> BOOST</div>
               <div class="hint-pill lobby-hint"><kbd>ESC</kbd> LOBBY</div>
+            </div>
+            <div class="mobile-hints">
+              <div class="hint-pill"><kbd>DRAG</kbd> STEER</div>
+              <div class="hint-pill boost-hint"><kbd>HOLD ⚡</kbd> BOOST</div>
+              <div class="hint-pill lobby-hint"><kbd>DOUBLE-TAP</kbd> BOOST</div>
             </div>
           </div>
         </div>
@@ -106,12 +135,18 @@
     <div id="hud" class="hidden">
       <!-- TOP LEFT: Small Minimap & Minimal Length -->
       <div class="hud-top-left">
-        <canvas id="minimap" class="minimap-canvas" width="104" height="104"></canvas>
-        <div id="scoreLen" class="mini-score">0</div>
+        <canvas id="minimap" class="minimap-canvas" width="104" height="104" aria-label="Arena minimap"></canvas>
+        <div class="hud-stat-col">
+          <div id="scoreLen" class="mini-score">0</div>
+          <div id="pingBadge" class="ping-badge" aria-live="off"></div>
+        </div>
       </div>
 
       <!-- TOP CENTER: Killfeed (User Kills Only) -->
       <div id="killfeed" class="killfeed"></div>
+
+      <!-- BR COLLAPSE CHAMPION BANNER -->
+      <div id="champBanner" class="champ-banner hidden" role="status"></div>
 
       <!-- TOP RIGHT: Tiny Top 3 Rank Badge -->
       <div id="board" class="board">
@@ -131,6 +166,7 @@
       <div class="panel menu-panel center death-panel">
         <div class="sticker-tag death-sticker">💥 GAME OVER</div>
         <h2 class="death-title">SNAKE ELIMINATED</h2>
+        <div id="pbBanner" class="pb-banner hidden" role="status"></div>
         <div id="deathKiller" class="death-killer"></div>
         <div id="deathStats" class="death-stats"></div>
         <button id="respawn" class="btn btn-play">RESPAWN NOW ➔</button>
@@ -140,7 +176,7 @@
     <!-- CONNECTION LOST -->
     <div id="connLost" class="overlay hidden">
       <div class="panel menu-panel center">
-        <h2 class="death-title">CONNECTION LOST</h2>
+        <h2 id="connLostTitle" class="death-title">CONNECTION LOST</h2>
         <button id="reconnect" class="btn btn-play">RECONNECT ➔</button>
       </div>
     </div>

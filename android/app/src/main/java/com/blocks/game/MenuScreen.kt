@@ -12,13 +12,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -51,6 +55,7 @@ fun MenuScreen(
     var server by remember { mutableStateOf(initial.server) }
     var colorIdx by remember { mutableStateOf(initial.color) }
     var patternIdx by remember { mutableStateOf(initial.pattern) }
+    var nameError by remember { mutableStateOf(false) }
 
     Box(
         Modifier
@@ -69,11 +74,14 @@ fun MenuScreen(
                 .padding(24.dp),
         ) {
             Column(
-                Modifier.fillMaxWidth(),
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .heightIn(min = 200.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
-                    "SLITHER ULTRA",
+                    "SNAKECHAIN",
                     color = Color.White,
                     fontSize = 32.sp,
                     fontWeight = FontWeight.Black,
@@ -92,6 +100,15 @@ fun MenuScreen(
 
                 FieldLabel("SNAKE NAME")
                 SlitherField(value = name, onChange = { if (it.length <= 14) name = it }, placeholder = "Enter nickname")
+                if (nameError) {
+                    Text(
+                        "ENTER A NICKNAME TO PLAY",
+                        color = Color(0xFFFF5C7A),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Black,
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    )
+                }
                 Spacer(Modifier.height(10.dp))
 
                 FieldLabel("SKIN COLOR")
@@ -128,7 +145,12 @@ fun MenuScreen(
                         .background(Color(0xFF00E676))
                         .clickable {
                             val n = name.trim()
-                            if (n.isNotEmpty()) onPlay(MenuPrefs(n, colorIdx, patternIdx, server.trim()))
+                            if (n.isNotEmpty()) {
+                                nameError = false
+                                onPlay(MenuPrefs(n, colorIdx, patternIdx, server.trim()))
+                            } else {
+                                nameError = true
+                            }
                         }
                         .padding(vertical = 14.dp),
                     contentAlignment = Alignment.Center,

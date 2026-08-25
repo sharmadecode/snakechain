@@ -97,6 +97,7 @@ class MainActivity : ComponentActivity() {
             },
             onClose = {
                 pendingJoin = false
+                serverStatus = "server: offline"
                 if (screen == Screen.Game && !quitting) connLost = true
             },
         )
@@ -112,8 +113,7 @@ class MainActivity : ComponentActivity() {
                 .put("t", "join")
                 .put("n", prefs.name)
                 .put("c", prefs.color)
-                .put("p", prefs.pattern)
-                .put("v", 1200),
+                .put("p", prefs.pattern),
         )
     }
 
@@ -151,18 +151,16 @@ class MainActivity : ComponentActivity() {
             "b" -> state.applyBody(msg)
             "df" -> state.applyDeaths(msg)
             "lb" -> {
-                val l = msg.optJSONArray("l")
-                state.leaderboard = if (l != null) (0 until l.length()).map { l.getJSONArray(it) } else listOf()
+                val l = msg.optJSONArray("l") ?: return
+                state.leaderboard = (0 until l.length()).mapNotNull { l.optJSONArray(it) }
             }
             "kf" -> {
                 val k = msg.optJSONArray("k") ?: return
                 for (i in 0 until k.length()) {
-                    val e = k.getJSONArray(i)
+                    val e = k.optJSONArray(i) ?: continue
                     val killerId = e.optInt(0, -1)
-                    val killerName = if (e.isNull(1)) "" else e.optString(1, "")
                     val victimName = e.optString(2, "")
-                    val wall = e.optInt(3, 0) == 1
-                    if (killerId == state.myId) {
+                    if (killerId == state.myId && victimName.isNotBlank()) {
                         val text = "⚔ YOU ELIMINATED ${victimName.uppercase()}"
                         killfeed.add(0, KfEntry(text, System.currentTimeMillis()))
                     }

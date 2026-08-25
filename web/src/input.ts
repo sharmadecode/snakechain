@@ -1,5 +1,20 @@
 const DEADZONE = 8;
 const MAX_JOY_RADIUS = 55;
+/** Synthetic mouse events (fired ~immediately after a tap) are ignored for
+    this long, so a touch player's snake never steers toward the last tap. */
+const TOUCH_MOUSE_GRACE_MS = 800;
+
+/** True while focus is in a text field — game keys must not be hijacked there. */
+function typingInField(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  return (
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT" ||
+    el.isContentEditable === true
+  );
+}
 
 export class Input {
   mouseX = 0;
@@ -10,8 +25,8 @@ export class Input {
   joyBaseY = 0;
   joyDX = 0;
   joyDY = 0;
-  isTouch = false;
   private touchId: number | null = null;
+  private lastTouchAt = 0;
   /** Boost state: left mouse held, boost key held, or on-screen button active. */
   mouseHeld = false;
   boostKey = false;
@@ -24,16 +39,16 @@ export class Input {
 
   attach(canvas: HTMLCanvasElement): void {
     canvas.addEventListener("mousemove", (e) => {
+      // Browsers fire a compatibility mousemove at the tap point right after
+      // a touch — latching hasMouse there would steer toward a stale tap.
+      if (performance.now() - this.lastTouchAt < TOUCH_MOUSE_GRACE_MS) return;
       this.hasMouse = true;
-      this.isTouch = false;
       this.mouseX = e.clientX;
       this.mouseY = e.clientY;
     });
 
-    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-
     canvas.addEventListener("touchstart", (e) => {
-      this.isTouch = true;
+      this.lastTouchAt = performance.now();
       this.hasMouse = false;
 
       for (let i = 0; i < e.changedTouches.length; i++) {
@@ -95,6 +110,11 @@ export class Input {
     canvas.addEventListener("touchcancel", handleTouchEnd, { passive: true });
 
     window.addEventListener("mousedown", (e) => {
+      if (performance.now() - this.lastTouchAt < TOUCH_MOUSE_GRACE_MS) return;
+      // Menu/overlay/button clicks must not latch boost — otherwise clicking
+      // PLAY spawns you already boosting until the first mouse-up.
+      const t = e.target as HTMLElement | null;
+      if (t && t.closest("button, input, .overlay")) return;
       if (e.button === 0) this.mouseHeld = true;
     });
     window.addEventListener("mouseup", (e) => {
@@ -102,10 +122,16 @@ export class Input {
     });
 
     window.addEventListener("keydown", (e) => {
+      // Never hijack keys while typing (Space must type a space in the
+      // nickname field) or when a button has focus (Space activates it).
+      if (typingInField(e.target)) return;
       this.updateKeys(e.key, true);
       if (e.key === " " || e.key === "Shift") e.preventDefault();
     });
-    window.addEventListener("keyup", (e) => this.updateKeys(e.key, false));
+    window.addEventListener("keyup", (e) => {
+      if (typingInField(e.target)) return;
+      this.updateKeys(e.key, false);
+    });
     window.addEventListener("blur", () => {
       this.keyX = 0;
       this.keyY = 0;

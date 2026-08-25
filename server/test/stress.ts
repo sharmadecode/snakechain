@@ -87,7 +87,12 @@ function makeClient(i: number, autoQuitAfter: number): void {
     if (msg.t === "lb") lbCount++;
   });
 
+  // "error" is always followed by "close" — guard so each client counts once
+  // (double-counting made clientsDone overshoot N and the run hang to timeout).
+  let finished = false;
   const done = () => {
+    if (finished) return;
+    finished = true;
     clearInterval(inputTimer);
     clearTimeout(quitTimer);
     ws.terminate();

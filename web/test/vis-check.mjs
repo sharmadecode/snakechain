@@ -3,10 +3,12 @@ import puppeteer from "puppeteer-core";
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const URL = process.env.TEST_URL ?? "http://127.0.0.1:8787/";
 
+// Must mirror web/src/patterns.ts PALETTE exactly — the pixel classifier
+// can only find what the renderer actually draws.
 const COLORS = [
-  "#FF4D4D", "#FF8A3D", "#FFD93D", "#6BCB77",
-  "#3DA5FF", "#7C5CFF", "#FF5CA8", "#00D1C0",
-  "#FF9A9E", "#A8FF3D", "#C0C0FF", "#FFB84D",
+  "#FFD93D", "#FF5722", "#00C2D1", "#A8E10C",
+  "#FF5CA8", "#7C5CFF", "#00D1C0", "#FF3B30",
+  "#FF9A9E", "#C0C0FF", "#FFAA00", "#FFFFFF",
 ].map((h) => {
   const n = parseInt(h.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
@@ -73,4 +75,9 @@ const stats = await page.evaluate((cols) => {
 
 console.log(JSON.stringify(stats, null, 2));
 await browser.close();
-process.exit(0);
+// Gate the run: joining must have succeeded AND palette-colored pixels
+// (snake body and/or food) must exist on screen. Previously this script was
+// informational only — it always exited 0 regardless of what it saw.
+const ok = stats.centerSnake + stats.edgeSnake > 0;
+console.log(ok ? "VIS CHECK: PASS" : "VIS CHECK: FAIL (no palette pixels rendered)");
+process.exit(ok ? 0 : 1);

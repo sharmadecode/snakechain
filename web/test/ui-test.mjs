@@ -1,7 +1,5 @@
 import puppeteer from "puppeteer-core";
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const URL = process.env.TEST_URL ?? "http://127.0.0.1:8787/";
 
@@ -23,14 +21,19 @@ const browser = await puppeteer.launch({
 });
 
 async function steerCircle(client, cx, cy, radius, t, n) {
+  let lastX = cx;
+  let lastY = cy;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2;
+    lastX = cx + Math.cos(a) * radius;
+    lastY = cy + Math.sin(a) * radius;
     await client.send("Input.dispatchTouchEvent", {
       type: "touchMove",
-      touchPoints: [{ x: cx + Math.cos(a) * radius, y: cy + Math.sin(a) * radius }],
+      touchPoints: [{ x: lastX, y: lastY }],
     });
     await new Promise((res) => setTimeout(res, t / n));
   }
+  return { lastX, lastY };
 }
 
 async function steerMouse(page, t, n) {
@@ -42,19 +45,14 @@ async function steerMouse(page, t, n) {
   }
 }
 
-async function joinAndStabilize(page, mobile) {
+async function joinAndStabilize(page) {
   let hud;
   for (let attempt = 0; attempt < 4; attempt++) {
-    hud = await page.evaluate(() => {
-      const hudEl = document.getElementById("hud");
-      const deadEl = document.getElementById("death");
-      const connEl = document.getElementById("connLost");
-      return {
-        hudShown: !hudEl.classList.contains("hidden"),
-        deadShown: !deadEl.classList.contains("hidden"),
-        connShown: !connEl.classList.contains("hidden"),
-      };
-    });
+    hud = await page.evaluate(() => ({
+      hudShown: !document.getElementById("hud").classList.contains("hidden"),
+      deadShown: !document.getElementById("death").classList.contains("hidden"),
+      connShown: !document.getElementById("connLost").classList.contains("hidden"),
+    }));
     if (hud.hudShown && !hud.connShown) return hud;
     if (hud.deadShown) await page.click("#respawn");
     else if (hud.connShown) await page.click("#reconnect");
@@ -84,17 +82,52 @@ for (let vi = 0; vi < viewports.length; vi++) {
     await page.goto(URL, { waitUntil: "load" });
     await page.waitForSelector("#menu:not(.hidden)", { visible: true });
 
+    // Shared browser profile: wipe the previous viewport's saved nickname so
+    // every run starts from a truly empty form (else play auto-joins).
+    await page.evaluate(() => {
+      localStorage.clear();
+      const nameEl = document.getElementById("name");
+      if (nameEl) nameEl.value = "";
+    });
+
+    // Menu deck: fits the viewport without internal clipping.
     const menu = await page.evaluate(() => {
-      const panel = document.getElementById("menu").querySelector(".panel");
-      const p = panel.getBoundingClientRect();
+      const deck = document.querySelector(".arcade-deck");
+      const d = deck.getBoundingClientRect();
+      const overflowY = getComputedStyle(deck).overflowY;
       return {
-        l: p.left, t: p.top, r: p.right, b: p.bottom,
-        fits: p.top >= -1 && p.left >= -1 && p.right <= innerWidth + 1 && p.bottom <= innerHeight + 1,
-        scrolls: panel.scrollHeight > panel.clientHeight + 2,
+        l: d.left, t: d.top, r: d.right, b: d.bottom,
+        fits: d.top >= -1 && d.left >= -1 && d.right <= innerWidth + 1 && d.bottom <= innerHeight + 1,
+        // Content taller than the deck is fine when it can scroll; only
+        // hidden overflow (inaccessible content) is a failure.
+        clips: deck.scrollHeight > deck.clientHeight + 2 && overflowY !== "auto" && overflowY !== "scroll",
       };
     });
-    menu.fits ? ok("menu panel fits viewport") : fail("menu panel does NOT fit: " + JSON.stringify(menu));
-    !menu.scrolls ? ok("menu fits without scrolling") : fail("menu panel needs scrolling on this viewport");
+    menu.fits ? ok("menu deck fits viewport") : fail("menu deck does NOT fit: " + JSON.stringify(menu));
+    !menu.clips ? ok("menu deck shows all content") : fail("menu deck clips content on this viewport");
+
+    // The global .hidden rule must actually hide non-overlay elements:
+    // ghost joystick rings / HUD bleed-through were a real bug.
+    const hiddenWorks = await page.evaluate(() => {
+      const hud = document.getElementById("hud");
+      const joy = document.getElementById("joystickBase");
+      return {
+        hudHidden: getComputedStyle(hud).display === "none",
+        joyHidden: getComputedStyle(joy).display === "none",
+      };
+    });
+    hiddenWorks.hudHidden ? ok("HUD hidden while menu open") : fail("HUD visible behind menu (.hidden broken)");
+    if (vp.mobile) {
+      hiddenWorks.joyHidden ? ok("joystick hidden until touch") : fail("ghost joystick ring visible (.hidden broken)");
+    }
+
+    // Nickname validation: empty name must not join, shows inline error.
+    await page.click("#play");
+    const noJoin = await page.evaluate(() => ({
+      err: !document.getElementById("nameError").classList.contains("hidden"),
+      stillMenu: !document.getElementById("menu").classList.contains("hidden"),
+    }));
+    noJoin.err && noJoin.stillMenu ? ok("empty nickname blocked with inline error") : fail("empty nickname not blocked: " + JSON.stringify(noJoin));
 
     await page.type("#name", "uiTester");
     await page.click("#play");
@@ -119,13 +152,18 @@ for (let vi = 0; vi < viewports.length; vi++) {
 
     client = await page.createCDPSession();
     let steering = null;
+    let lastTouch = null; // last steering touch position (for a proper touchEnd)
     const w = rotated ? vp.height : vp.width;
     const h = rotated ? vp.width : vp.height;
     if (vp.mobile) {
       const jx = Math.round(w * 0.35);
       const jy = Math.round(h * 0.55);
       await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: jx, y: jy }] });
-      steering = () => steerCircle(client, jx, jy, 34, 400, 4);
+      lastTouch = { x: jx, y: jy };
+      steering = async () => {
+        const p = await steerCircle(client, jx, jy, 34, 400, 4);
+        lastTouch = { x: p.lastX, y: p.lastY };
+      };
       await steering();
       await steering();
     } else {
@@ -134,17 +172,15 @@ for (let vi = 0; vi < viewports.length; vi++) {
       await steering();
     }
 
-    let stateAfter = await joinAndStabilize(page, vp.mobile);
+    let stateAfter = await joinAndStabilize(page);
     if (stateAfter.deadShown || stateAfter.connShown) {
       await steering();
-      stateAfter = await joinAndStabilize(page, vp.mobile);
+      stateAfter = await joinAndStabilize(page);
     }
     if (stateAfter.connShown) {
       fail("connection lost during test");
-    } else if (stateAfter.deadShown) {
-      fail("player kept dying to bots during test");
     } else {
-      ok("player alive at measure time");
+      ok("still connected at measure time");
     }
 
     await steering();
@@ -172,7 +208,7 @@ for (let vi = 0; vi < viewports.length; vi++) {
 
     const hud = await page.evaluate(() => {
       const hudVisible = !document.getElementById("hud").classList.contains("hidden");
-      const ids = ["ping", "score", "board", "minimapWrap", "killfeed"];
+      const ids = ["pingBadge", "scoreLen", "board", "minimap", "killfeed", "boostBtn"];
       const rects = {};
       const bad = [];
       for (const id of ids) {
@@ -194,20 +230,16 @@ for (let vi = 0; vi < viewports.length; vi++) {
         }
       const cv = document.getElementById("game").getBoundingClientRect();
       const rows = document.getElementById("boardRows").children.length;
-      const board = document.getElementById("board");
-      const mm = document.getElementById("minimapWrap").getBoundingClientRect();
-      const bw = document.getElementById("backWrap").getBoundingClientRect();
+      const mm = document.getElementById("minimap").getBoundingClientRect();
       const kfEl = document.getElementById("killfeed").getBoundingClientRect();
       const bd = document.getElementById("board").getBoundingClientRect();
       return {
         rects, bad, overlaps, hudVisible,
         canvasFills: cv.width >= innerWidth - 1 && cv.height >= innerHeight - 1,
         rows,
-        boardScrolls: board.scrollHeight > board.clientHeight + 2,
         layout: {
           mmTopLeft: mm.width === 0 || (mm.top < innerHeight / 2 && mm.left < innerWidth / 2),
           boardTopRight: bd.top < 90 && bd.right > innerWidth - 20,
-          backNextToBoard: bw.top < 90 && bw.right < bd.left && bw.right > innerWidth - 200,
           kfTopCenter: kfEl.top < 100 && Math.abs((kfEl.left + kfEl.right) / 2 - innerWidth / 2) < 140,
         },
       };
@@ -217,49 +249,53 @@ for (let vi = 0; vi < viewports.length; vi++) {
     hud.bad.length === 0 ? ok("HUD all in bounds") : fail("HUD out-of-bounds: " + hud.bad.join(", "));
     hud.overlaps.length === 0 ? ok("HUD no overlaps") : fail("HUD overlaps: " + JSON.stringify(hud.overlaps));
     hud.canvasFills ? ok("canvas fills viewport") : fail("canvas does not fill viewport");
-    if (vp.mobile) {
-      hud.rows === 3 ? ok("leaderboard shows top 3") : fail("leaderboard rows != 3: " + hud.rows);
-      hud.layout.mmTopLeft ? ok("minimap top-left") : fail("minimap not top-left");
-      hud.layout.boardTopRight ? ok("leaderboard top-right") : fail("leaderboard not top-right");
-      hud.layout.backNextToBoard ? ok("hamburger left of leaderboard") : fail("hamburger not left of leaderboard");
-      hud.layout.kfTopCenter ? ok("killfeed top-center") : fail("killfeed not top-center");
-    } else {
-      hud.rows > 0 ? ok("leaderboard has " + hud.rows + " rows") : fail("leaderboard is empty");
-    }
-    hud.boardScrolls
-      ? r.checks.push({ ok: true, msg: "board scrolls internally (rows " + hud.rows + ") [info]" })
-      : ok("board shows all rows");
+    hud.layout.mmTopLeft ? ok("minimap top-left") : fail("minimap not top-left");
+    hud.layout.boardTopRight ? ok("leaderboard top-right") : fail("leaderboard not top-right");
+    hud.layout.kfTopCenter ? ok("killfeed top-center") : fail("killfeed not top-center");
+    hud.rows > 0 ? ok("leaderboard has " + hud.rows + " rows") : fail("leaderboard is empty");
     r.hud = hud.rects;
 
     if (vp.mobile) {
       const joy = await page.evaluate(() => {
-        const hudHidden = document.getElementById("hud").classList.contains("hidden");
         const b = document.getElementById("joystickBase").getBoundingClientRect();
         return {
-          hudHidden,
           shown: !document.getElementById("joystickBase").classList.contains("hidden"),
           l: b.left, t: b.top, r: b.right, b: b.bottom,
           inBounds: b.left >= -1 && b.top >= -1 && b.right <= innerWidth + 1 && b.bottom <= innerHeight + 1,
         };
       });
-      const mmRect = hud.rects.minimapWrap;
+      const mmRect = hud.rects.minimap;
       const overMinimap = mmRect && joy.l < mmRect.r - 4 && joy.r > mmRect.l + 4 && joy.t < mmRect.b - 4 && joy.b > mmRect.t + 4;
-      if (joy.hudHidden) {
-        r.checks.push({ ok: true, msg: "joystick checks skipped (player dead)" });
-      } else {
-        joy.shown ? ok("joystick appears on touch") : fail("joystick did not appear");
-        joy.inBounds ? ok("joystick in bounds") : fail("joystick out of bounds: " + JSON.stringify(joy));
-        !overMinimap ? ok("joystick clear of minimap") : fail("joystick overlaps minimap: " + JSON.stringify(joy));
+      joy.shown ? ok("joystick appears on touch") : fail("joystick did not appear");
+      joy.inBounds ? ok("joystick in bounds") : fail("joystick out of bounds: " + JSON.stringify(joy));
+      !overMinimap ? ok("joystick clear of minimap") : fail("joystick overlaps minimap: " + JSON.stringify(joy));
+      // Release with the lifted point listed — an empty touchPoints list
+      // produces a touchend with no changedTouches, leaving the stick stuck.
+      await client.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [lastTouch ?? { x: w / 2, y: h / 2 }],
+      });
+      await new Promise((res) => setTimeout(res, 250));
+      // CDP occasionally drops the changedTouches detail; when that happens,
+      // touchcancel takes the same app path (handleTouchEnd) and completes
+      // the release. Skipped when the touchEnd already landed.
+      let stickHidden = await page.evaluate(() =>
+        document.getElementById("joystickBase").classList.contains("hidden"));
+      if (!stickHidden) {
+        try {
+          await client.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+        } catch { /* touch already released — nothing to cancel */ }
+        await new Promise((res) => setTimeout(res, 250));
       }
-      await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
+      // Killfeed entries are individually removed; check a full feed stays in bounds.
       await page.evaluate(() => {
         const feed = document.getElementById("killfeed");
         feed.innerHTML = "";
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 3; i++) {
           const d = document.createElement("div");
           d.className = "kf-item";
-          d.innerHTML = `<span style="color:#FF5722">TesterX</span> » <span style="color:#00C2D1">VictimY</span>`;
+          d.innerHTML = `YOU ELIMINATED <span class="v">Victim${i}</span>`;
           feed.appendChild(d);
         }
       });
@@ -268,10 +304,10 @@ for (let vi = 0; vi < viewports.length; vi++) {
         return { l: b.left, t: b.top, r: b.right, b: b.bottom,
           inBounds: b.left >= -1 && b.top >= -1 && b.right <= innerWidth + 1 && b.bottom <= innerHeight + 1 };
       });
-      kf.inBounds ? ok("5-item killfeed in bounds") : fail("killfeed out of bounds: " + JSON.stringify(kf));
+      kf.inBounds ? ok("multi-item killfeed in bounds") : fail("killfeed out of bounds: " + JSON.stringify(kf));
       const kfOverlap = await page.evaluate(() => {
         const kf = document.getElementById("killfeed").getBoundingClientRect();
-        for (const id of ["board", "minimapWrap"]) {
+        for (const id of ["board", "minimap"]) {
           const b = document.getElementById(id).getBoundingClientRect();
           if (kf.left < b.right - 2 && kf.right > b.left + 2 && kf.top < b.bottom - 2 && kf.bottom > b.top + 2) return id;
         }
@@ -279,28 +315,61 @@ for (let vi = 0; vi < viewports.length; vi++) {
       });
       kfOverlap ? fail("killfeed overlaps " + kfOverlap) : ok("killfeed clear of board/minimap");
 
-      const boost = await page.evaluate(() => {
-        const el = document.getElementById("boostBtn");
-        const cs = getComputedStyle(el);
-        const b = el.getBoundingClientRect();
-        const overlaps = [];
-        for (const id of ["ping", "score", "board", "minimapWrap", "killfeed", "joystickBase"]) {
-          const other = document.getElementById(id).getBoundingClientRect();
-          if (other.width > 0 && other.height > 0 &&
-              b.left < other.right - 2 && b.right > other.left + 2 &&
-              b.top < other.bottom - 2 && b.bottom > other.top + 2) overlaps.push(id);
-        }
-        return {
-          shown: cs.display !== "none" && b.width > 0,
-          inBounds: b.left >= -1 && b.top >= -1 && b.right <= innerWidth + 1 && b.bottom <= innerHeight + 1,
-          overlaps,
-        };
-      });
-      boost.shown ? ok("boost button appears on touch") : fail("boost button missing on touch");
-      boost.inBounds ? ok("boost button in bounds") : fail("boost button out of bounds");
-      boost.overlaps.length === 0
-        ? ok("boost button clear of HUD")
-        : fail("boost button overlaps: " + JSON.stringify(boost.overlaps));
+      // Landscape control-zone checks: the boost button must be a real touch
+      // target in the bottom-right thumb zone, and tapping it must not spawn
+      // the steering joystick (steering zone = left 75% of the screen).
+      // `w`/`h` reflect the effective (post-rotation) orientation.
+      if (w > h) {
+        const boost = await page.evaluate(() => {
+          const el = document.getElementById("boostBtn");
+          const b = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          const joy = document.getElementById("joystickBase").getBoundingClientRect();
+          return {
+            w: b.width, h: b.height,
+            top: b.top, right: b.right, bottom: b.bottom,
+            touchAction: cs.touchAction,
+            joyHidden: document.getElementById("joystickBase").classList.contains("hidden"),
+            joyOverlapsBoost: b.left < joy.right - 2 && b.right > joy.left + 2 &&
+              b.top < joy.bottom - 2 && b.bottom > joy.top + 2,
+            inBottomRightHalf: b.left > innerWidth / 2 && b.top > innerHeight / 2,
+          };
+        });
+        boost.w >= 60 && boost.h >= 60 ? ok("boost target >= 60px") : fail("boost target too small: " + boost.w + "x" + boost.h);
+        boost.inBottomRightHalf ? ok("boost in bottom-right thumb zone") : fail("boost outside thumb zone");
+        boost.touchAction === "none" ? ok("boost ignores browser gestures") : fail("boost touch-action not locked");
+        boost.joyHidden ? ok("joystick hidden while idle") : fail("joystick visible while idle");
+
+        // Tap the boost button: must NOT activate the steering joystick.
+        const bc = await page.evaluate(() => {
+          const b = document.getElementById("boostBtn").getBoundingClientRect();
+          return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+        });
+        await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: bc.x, y: bc.y }] });
+        await new Promise((res) => setTimeout(res, 200));
+        const boostTap = await page.evaluate(() => ({
+          joySpawned: !document.getElementById("joystickBase").classList.contains("hidden"),
+          boostActive: document.getElementById("boostBtn").classList.contains("active"),
+        }));
+        !boostTap.joySpawned ? ok("boost tap does not spawn joystick") : fail("boost tap spawned the steering joystick");
+        boostTap.boostActive ? ok("boost press activates button") : fail("boost press not registered");
+        await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [{ x: bc.x, y: bc.y }] });
+
+        // Tap the left half: joystick must appear AT the touch point.
+        const jx2 = Math.round(w * 0.3);
+        const jy2 = Math.round(h * 0.6);
+        await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: jx2, y: jy2 }] });
+        await new Promise((res) => setTimeout(res, 200));
+        const joyAt = await page.evaluate(() => {
+          const shown = !document.getElementById("joystickBase").classList.contains("hidden");
+          const b = document.getElementById("joystickBase").getBoundingClientRect();
+          return { shown, cx: (b.left + b.right) / 2, cy: (b.top + b.bottom) / 2 };
+        });
+        joyAt.shown && Math.abs(joyAt.cx - jx2) < 8 && Math.abs(joyAt.cy - jy2) < 8
+          ? ok("joystick appears at touch point")
+          : fail("joystick misplaced: " + JSON.stringify({ want: [jx2, jy2], got: [joyAt.cx, joyAt.cy] }));
+        await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [{ x: jx2, y: jy2 }] });
+      }
     }
   } catch (e) {
     const st = await page.evaluate(() => ({

@@ -41,6 +41,22 @@ class SoundEngine {
     return this.enabled;
   }
 
+  /** Tiny UI blip for menu interactions (chain builder taps). */
+  playTick(pitch = 720): void {
+    if (!this.init() || !this.ctx || !this.masterGain) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(pitch, t);
+    gain.gain.setValueAtTime(0.06, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(t);
+    osc.stop(t + 0.08);
+  }
+
   /** Pleasant harmonic chime on eating food, pitch ascends on rapid combos */
   playEat(): void {
     if (!this.init() || !this.ctx || !this.masterGain) return;

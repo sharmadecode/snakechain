@@ -5,6 +5,12 @@ export interface PlayerState {
   patternIdx: number;
   isBot: boolean;
   kills: number;
+  /** Fresh-spawn shield (server flag, broadcast row slot 9). Display only. */
+  shield: boolean;
+  /** Render-side boost state with hysteresis (inferred from velocity EMA for
+      remotes; main.ts overrides with exact input state for SELF). Drives the
+      boost glow. Purely cosmetic — server collision never reads this. */
+  boostVis: boolean;
   tx: number;
   ty: number;
   ta: number;
@@ -34,21 +40,32 @@ export interface DeadStats {
   maxLen: number;
   rank: number;
   killerName?: string | null;
+  killerId?: number;
   wall?: boolean;
 }
 
 const SPACING = 10;
+/** Mirrors server MAX_POINTS (config.ts). Kept as a named constant so the
+    two can never silently drift — see server/src/config.ts rationale. */
+const MAX_LOCAL_POINTS = 900;
 
 export class GameState {
   myId = 0;
   halfW = 900;
   halfH = 900;
   tickRate = 30;
+  /** Turn model echoed by the server `hi` handshake:
+      [MAX_TURN_SPEED, MIN_TURN_SPEED, TURN_SPEED_FALLOFF]. Falls back to the
+      shipped defaults so an old server can't break prediction. */
+  turn: number[] = [6.0, 2.8, 800];
   players = new Map<number, PlayerState>();
-  /** id -> [x, y, colorIdx, dropSpawnTimeMs] */
-  food = new Map<number, [number, number, number, number]>();
+  /** id -> [x, y, colorIdx, dropSpawnTimeMs, golden?] */
+  food = new Map<number, [number, number, number, number, number?]>();
   leaderboard: Array<[number, string, number, number, number]> = [];
   ping = -1;
+  /** Spectate-on-death: while dead with a known killer, the camera follows
+      this player id instead of freezing. Cleared on respawn/lobby/reset. */
+  spectateId = 0;
   dead: DeadStats | null = null;
   alive = false;
   /** Renderer-consumed effect queues: [x, y, colorIdx, thick] for bursts. */
@@ -67,8 +84,12 @@ export class GameState {
     this.food.clear();
     this.leaderboard = [];
     this.ping = -1;
+    this.spectateId = 0;
     this.dead = null;
     this.alive = false;
+    // Leftover burst/sparkle queues must not replay into a fresh session.
+    this.deathFx.length = 0;
+    this.eatenFx.length = 0;
   }
 
   applyState(msg: Record<string, unknown>): void {
@@ -131,9 +152,17 @@ export class GameState {
         pl.tlen = tlen;
         pl.thick = thick;
         pl.kills = row[10] as number;
-        pl.name = row[11] as string;
+        pl.shield = row[9] === 1;
+        // Boost hysteresis: base speed ~170, boost ~320. Band 215–255 keeps
+        // estimation noise from flickering the glow on/off.
+        const spd = Math.hypot(pl.vx, pl.vy);
+        if (!pl.boostVis && spd > 255) pl.boostVis = true;
+        else if (pl.boostVis && spd < 215) pl.boostVis = false;
+        // Rows carry an empty name slot (server slimmed them — names travel
+        // via lb/kf/dead); only overwrite when something real arrives.
+        const nm = row[11] as string;
+        if (nm) pl.name = nm;
         pl.lastRowT = now;
-        this.extendTail(pl);
       } else {
         this.players.set(id, this.makePlayer(row));
       }
@@ -155,22 +184,34 @@ export class GameState {
     const tlen = row[4] as number;
     const thick = row[5] as number;
     const now = performance.now();
-    const seedN = 8;
+    // Chain seed sized to FULL length: every viewer immediately renders the
+    // correct-length body, and the local follow-sim bends it toward the true
+    // shape as head history replays. (A short "authority-completed" seed was
+    // tried and reverted — without snapshot interpolation it jittered.)
+    const n = Math.min(
+      MAX_LOCAL_POINTS,
+      Math.max(4, Math.round(tlen / SPACING)),
+    );
     const cx = Math.cos(ta);
     const cy = Math.sin(ta);
     const px: number[] = [];
     const py: number[] = [];
-    for (let k = 1; k <= seedN; k++) {
+    // Straight chain seeded behind the head (px[0] IS the head — mirrors the
+    // server). The authoritative `b` snapshot corrects the true shape within
+    // ~100ms; until then a straight body beats an invisible one.
+    for (let k = 0; k < n; k++) {
       px.push(tx - cx * SPACING * k);
       py.push(ty - cy * SPACING * k);
     }
     return {
       id,
-      name: row[11] as string,
+      name: (row[11] as string) || "",
       colorIdx: row[6] as number,
       patternIdx: row[7] as number,
       isBot: (row[8] as number) === 1,
       kills: row[10] as number,
+      shield: row[9] === 1,
+      boostVis: false,
       tx,
       ty,
       ta,
@@ -182,11 +223,15 @@ export class GameState {
       len: tlen,
       px,
       py,
-      total: seedN * SPACING,
-      vx: 0,
-      vy: 0,
-      rvx: 0,
-      rvy: 0,
+      total: (n - 1) * SPACING,
+      vx: Math.cos(ta) * 170,
+      vy: Math.sin(ta) * 170,
+      // Seed the correction follower consistently so a newly-visible snake
+      // moves INSTANTLY at base speed along its heading instead of freezing
+      // until ~150ms of row history accumulates (the "snake glitches on
+      // spawn" report). Rows correct the estimate within a few ticks.
+      rvx: Math.cos(ta) * 170,
+      rvy: Math.sin(ta) * 170,
       lastRowT: now,
       rowHist: [],
       body: null,
@@ -225,9 +270,9 @@ export class GameState {
     this.food.clear();
     const now = performance.now();
     for (const row of f) {
-      const r = row as [number, number, number, number, number?];
+      const r = row as [number, number, number, number, number?, number?];
       const isDrop = r[4] === 1;
-      this.food.set(r[0], [r[1], r[2], r[3], isDrop ? now : 0]);
+      this.food.set(r[0], [r[1], r[2], r[3], isDrop ? now : 0, r[5] === 1 ? 1 : 0]);
     }
   }
 
@@ -235,13 +280,13 @@ export class GameState {
     const now = performance.now();
     const keep = msg.k as unknown[];
     if (keep) {
-      const next = new Map<number, [number, number, number, number]>();
+      const next = new Map<number, [number, number, number, number, number?]>();
       for (const row of keep) {
-        const r = row as [number, number, number, number, number?];
+        const r = row as [number, number, number, number, number?, number?];
         const isDrop = r[4] === 1;
         const old = this.food.get(r[0]);
         const dropT = isDrop ? (old ? old[3] : now) : 0;
-        next.set(r[0], [r[1], r[2], r[3], dropT]);
+        next.set(r[0], [r[1], r[2], r[3], dropT, r[5] === 1 ? 1 : (old?.[4] ?? 0)]);
       }
       for (const id of this.food.keys()) {
         if (!next.has(id)) this.food.delete(id);
@@ -251,14 +296,16 @@ export class GameState {
     }
     const spawned = (msg.s as unknown[]) ?? [];
     for (const row of spawned) {
-      const r = row as [number, number, number, number, number?];
+      const r = row as [number, number, number, number, number?, number?];
       const isDrop = r[4] === 1;
-      this.food.set(r[0], [r[1], r[2], r[3], isDrop ? now : 0]);
+      this.food.set(r[0], [r[1], r[2], r[3], isDrop ? now : 0, r[5] === 1 ? 1 : 0]);
     }
     const removed = (msg.r as number[]) ?? [];
     for (const id of removed) {
       const f = this.food.get(id);
-      if (f) {
+      // Sparkle only for food near US (BR purges remove far-off pellets and
+      // must not spray eat-FX at the wall edge).
+      if (f && (!this.getSelf() || Math.hypot(f[0] - this.getSelf()!.x, f[1] - this.getSelf()!.y) < 900)) {
         if (this.eatenFx.length >= 40) this.eatenFx.shift();
         this.eatenFx.push([f[0], f[1], f[2]]);
       }
@@ -268,31 +315,6 @@ export class GameState {
 
   getSelf(): PlayerState | null {
     return this.players.get(this.myId) ?? null;
-  }
-
-  /** Mirror the server's tail extension: when a big eat makes the target
-      length outgrow the locally-built path, extend the path at the tail so
-      the body grows from the tail instantly (like the server does). */
-  private extendTail(pl: PlayerState): void {
-    if (pl.tlen <= pl.total + 60) return;
-    const n = pl.px.length;
-    if (n < 2) return;
-    const dx = pl.px[n - 1]! - pl.px[n - 2]!;
-    const dy = pl.py[n - 1]! - pl.py[n - 2]!;
-    const d = Math.hypot(dx, dy) || 1;
-    const ux = dx / d;
-    const uy = dy / d;
-    let need = pl.tlen - pl.total;
-    let added = 0;
-    while (need > 4 && added < Math.max(0, 1200 - n)) {
-      const lx = pl.px[pl.px.length - 1]!;
-      const ly = pl.py[pl.py.length - 1]!;
-      pl.px.push(lx + ux * SPACING);
-      pl.py.push(ly + uy * SPACING);
-      pl.total += SPACING;
-      need -= SPACING;
-      added++;
-    }
   }
 
   /** Per-frame smoothing + local path building for every visible player. */
@@ -346,56 +368,57 @@ export class GameState {
       pl.a += d * k;
       pl.len = pl.tlen;
 
-      const dx = pl.x - (pl.px[0] ?? pl.x);
-      const dy = pl.y - (pl.py[0] ?? pl.y);
-      const moved = Math.hypot(dx, dy);
+      // --- follow-the-leader chain — identical math to Player.move ---
+      // px[0] IS the head. Segments closer than SPACING (inner rail of tight
+      // turns) stay bunched — that asymmetry compacts loops exactly like the
+      // authority does, so prediction never fights the snapshots. Squared-
+      // distance gate mirrors the server (sqrt only on actual snaps).
       if (pl.px.length === 0) {
         pl.px.push(pl.x);
         pl.py.push(pl.y);
-        pl.total = 0;
-      } else if (moved >= SPACING) {
-        pl.px.unshift(pl.x);
-        pl.py.unshift(pl.y);
-        pl.total += moved;
       }
-      let guard = pl.px.length;
-      while (pl.px.length > 2 && guard-- > 0 && pl.px.length > 1200) {
-        const n = pl.px.length;
-        pl.total -= Math.hypot(pl.px[n - 2]! - pl.px[n - 1]!, pl.py[n - 2]! - pl.py[n - 1]!);
+      pl.px[0] = pl.x;
+      pl.py[0] = pl.y;
+      const spacingSq = SPACING * SPACING;
+      for (let i = 1; i < pl.px.length; i++) {
+        const ax = pl.px[i - 1]!;
+        const ay = pl.py[i - 1]!;
+        const dx = pl.px[i]! - ax;
+        const dy = pl.py[i]! - ay;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > spacingSq) {
+          const dist = Math.sqrt(d2);
+          const kk = SPACING / dist;
+          pl.px[i] = ax + dx * kk;
+          pl.py[i] = ay + dy * kk;
+          pl.total += SPACING - dist;
+        }
+      }
+      // Segment-count management toward pl.len — for EVERYONE (bounded growth
+      // keeps big eats looking organic; shrink follows boost drain). New
+      // segments extend OUTWARD from the true tail along its own direction.
+      const desired = Math.min(MAX_LOCAL_POINTS, Math.max(4, Math.round(pl.len / SPACING)));
+      let grown = 0;
+      while (pl.px.length < desired && grown < 2) {
+        const m = pl.px.length;
+        const tx = pl.px[m - 1]!;
+        const ty = pl.py[m - 1]!;
+        let dx = tx - pl.px[m - 2]!;
+        let dy = ty - pl.py[m - 2]!;
+        const dl = Math.hypot(dx, dy) || 1;
+        dx /= dl;
+        dy /= dl;
+        const ext = Math.min(SPACING * 0.6, dl * 0.5);
+        pl.px.push(tx + dx * ext);
+        pl.py.push(ty + dy * ext);
+        pl.total += ext;
+        grown++;
+      }
+      while (pl.px.length > desired && pl.px.length > 4) {
+        const m = pl.px.length;
+        pl.total -= Math.hypot(pl.px[m - 1]! - pl.px[m - 2]!, pl.py[m - 1]! - pl.py[m - 2]!);
         pl.px.pop();
         pl.py.pop();
-      }
-      // Shrink the tail smoothly: slide the last vertex toward its
-      // neighbour by the excess instead of popping whole segments, so the
-      // tail end glides when boosting (draining length) instead of snapping.
-      const budget = pl.len + 50;
-      if (pl.px.length > 2 && pl.total > budget) {
-        let excess = pl.total - budget;
-        let g = 8;
-        while (pl.px.length > 2 && excess > 0.01 && g-- > 0) {
-          const n = pl.px.length;
-          const sx = pl.px[n - 1]! - pl.px[n - 2]!;
-          const sy = pl.py[n - 1]! - pl.py[n - 2]!;
-          const seg = Math.hypot(sx, sy);
-          if (seg <= 0.001) {
-            pl.px.pop();
-            pl.py.pop();
-            pl.total -= seg;
-            continue;
-          }
-          if (seg <= excess) {
-            pl.px.pop();
-            pl.py.pop();
-            pl.total -= seg;
-            excess -= seg;
-          } else {
-            const f = (seg - excess) / seg;
-            pl.px[n - 1] = pl.px[n - 2]! + sx * f;
-            pl.py[n - 1] = pl.py[n - 2]! + sy * f;
-            pl.total -= excess;
-            excess = 0;
-          }
-        }
       }
     }
   }

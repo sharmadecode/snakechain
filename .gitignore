@@ -16,6 +16,7 @@ android/.idea/
 # IDE
 .idea/
 .vscode/
+.zcode/
 *.swp
 *.swo
 

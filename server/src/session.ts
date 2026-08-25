@@ -1,14 +1,9 @@
-import { FoodManager, FoodItem } from "./food.js";
+﻿import { FoodManager, FoodItem } from "./food.js";
 import { Player } from "./player.js";
 import { Bot, BotContext } from "./bot.js";
 import { Grid } from "./grid.js";
 import * as C from "./config.js";
 import { dist2, pointSegDist2 } from "./vec.js";
-import fs from "node:fs";
-
-const fsSyncWrite = (line: string): void => {
-  fs.writeSync(1, line);
-};
 
 export interface ClientHandle {
   send(data: string): void;
@@ -17,6 +12,14 @@ export interface ClientHandle {
   /** Players whose authoritative body has already been sent to this client
       (reset on re-join; re-entry after leaving view re-sends immediately). */
   bodyKnown: Set<number>;
+  /** Food ids this client has been told about (spawn snapshot, batch events
+      and keep-sync all maintain it). The periodic keep-sync diffs against
+      this instead of re-sending the whole view every FOOD_SYNC_MS. */
+  foodKnown: Set<number>;
+  /** Spectate-on-death: while this client's snake is DEAD, interest filtering
+      centers on THIS player id instead of the corpse — otherwise the watched
+      killer stops streaming after the client TTL sweep (~3s). */
+  spectatePid: number;
 }
 
 export interface KillFeedEvent {
@@ -31,6 +34,7 @@ export interface DeadStats {
   maxLen: number;
   rank: number;
   killerName: string | null;
+  killerId: number;
   wall: boolean;
 }
 
@@ -40,8 +44,23 @@ interface SegEntry {
   cells: number[];
 }
 
+/** Distance tiering: actors farther than this from a client stream state
+    rows at half rate (~15Hz). Nearby combat stays at full ~30Hz. */
+const TIER_DIST2 = 900 * 900;
+
 function r1(v: number): number {
   return Math.round(v * 10) / 10;
+}
+
+/** Single wire-format builder for food rows — used by the join snapshot,
+    the periodic keep-sync and the batched event flush so all three can
+    never drift apart. `now` stamps the death-drop glow window. */
+function foodRow(f: FoodItem, now: number): string {
+  const isDrop = f.isDeathDrop && now - f.dropAt < C.DEATH_DROP_GLOW_MS ? 1 : 0;
+  // Golden flag appended ONLY when set — keeps ordinary rows byte-identical
+  // with pre-golden clients.
+  const gold = f.isGolden ? ",1" : "";
+  return `[${f.id},${r1(f.x)},${r1(f.y)},${f.colorIdx},${isDrop}${gold}]`;
 }
 
 let sessionSeq = 1;
@@ -58,11 +77,20 @@ export class Session {
   private grid = new Grid<FoodItem | SegEntry>(48);
   private tickId: NodeJS.Timeout | null = null;
   private killfeeds: KillFeedEvent[] = [];
+  /** Food events accumulated since the last FOOD_EVENT_BATCH flush. */
+  private batchSpawned: FoodItem[] = [];
+  private batchRemoved: Array<{ id: number; x: number; y: number }> = [];
   /** Real deaths queued for the per-tick `df` broadcast. */
   private deathEvents: Array<{ victim: Player; x: number; y: number }> = [];
   private deadStats = new Map<number, DeadStats>();
   private lastLbAt = 0;
   private lastFoodSyncAt = 0;
+  // --- Battle-Royale collapse state (see config BR_*) ---
+  private brTargetHalfW = C.WORLD_HALF;
+  private brNextShrinkAt = Date.now() + C.BR_FIRST_DELAY_MS;
+  private brHoldUntil = 0;
+  /** Champion announcement queued for the next flush (name is server-known). */
+  private pendingChamp: { id: number; name: string } | null = null;
   /** Last targetLen at which each player's body was sampled for clients
       (growth > BODY_GROWTH_RESEND forces an immediate refresh). */
   private bodyLenAt = new Map<number, number>();
@@ -70,12 +98,21 @@ export class Session {
   private perfAcc = 0;
   private perfSamples = 0;
   private lastPerfLog = 0;
+  /** Consecutive step() exceptions (EH-01): a permanent fault must be
+      visible on /health instead of limping silently at 30 logs/sec. */
+  private tickErrStreak = 0;
+  /** Wall-clock ms of the most recent tick() fire — backs /health's
+      sinceLastTickMs so a wedged interval is detectable from outside. */
+  private lastStepWallMs = 0;
   private accMs = 0;
   private lastTickAt: number | null = null;
   private ctx: BotContext;
 
-  constructor() {
-    this.id = `s${sessionSeq++}`;
+  readonly mode: "classic" | "br";
+
+  constructor(mode: "classic" | "br" = "classic") {
+    this.mode = mode;
+    this.id = `s${sessionSeq++}:${mode}`;
     this.ctx = {
       alivePlayers: [],
       getHalfW: () => this.halfW,
@@ -121,6 +158,22 @@ export class Session {
     return n;
   }
 
+  /** Cheap O(players) snapshot for the /health endpoint. */
+  healthStats(): {
+    humans: number; bots: number; alive: number; food: number;
+    tickErrStreak: number; tickMsAvg: number; sinceLastTickMs: number;
+  } {
+    return {
+      humans: this.humans.size,
+      bots: this.botCount(),
+      alive: this.aliveCount,
+      food: this.food.items.size,
+      tickErrStreak: this.tickErrStreak,
+      tickMsAvg: this.perfSamples > 0 ? +(this.perfAcc / this.perfSamples).toFixed(2) : -1,
+      sinceLastTickMs: this.lastStepWallMs > 0 ? Date.now() - this.lastStepWallMs : -1,
+    };
+  }
+
   /** Register a human client. Respawns the player if they were dead. */
   addHuman(player: Player, client: ClientHandle, spawn: boolean): void {
     this.players.set(player.id, player);
@@ -132,6 +185,14 @@ export class Session {
   removeHuman(playerId: number): void {
     const p = this.players.get(playerId);
     if (!p) return;
+    if (p.alive) {
+      // Disconnect/quit while alive: clients have no other removal signal
+      // ("absence from `s` is not death"), so emit the same `df` a real
+      // death gets. Deliberately NO killfeed and NO loot drop — nobody
+      // earned the kill, and drops would make quitting farmable.
+      p.die("crash");
+      this.deathEvents.push({ victim: p, x: p.x, y: p.y });
+    }
     this.removeSegsFromGrid(p);
     this.players.delete(playerId);
     this.humans.delete(playerId);
@@ -159,7 +220,13 @@ export class Session {
   private pendingSpawns = new Map<number, number>();
 
   private despawnBot(b: Bot): void {
-    if (b.alive) this.killPlayer(b, null, false, true);
+    if (b.alive) {
+      b.die("crash");
+      // Capacity despawns drop no food and emit no killfeed, but clients
+      // MUST still get the `df` event — it is the only client-side removal
+      // signal; absence from the `s` broadcast is not death.
+      this.deathEvents.push({ victim: b, x: b.x, y: b.y });
+    }
     this.removeSegsFromGrid(b);
     this.pendingSpawns.delete(b.id);
     this.bodyLenAt.delete(b.id);
@@ -176,7 +243,12 @@ export class Session {
       return false;
     }
     this.pendingSpawns.delete(p.id);
-    p.spawn(pos[0], pos[1], Math.random() * Math.PI * 2);
+    p.spawn(
+      pos[0],
+      pos[1],
+      Math.random() * Math.PI * 2,
+      p.isBot ? C.BOT_START_LENGTH : C.START_LENGTH,
+    );
     return true;
   }
 
@@ -197,22 +269,14 @@ export class Session {
 
   /**
    * Re-registers all active body segments of a player in the spatial grid every tick.
-   * This guarantees 100% accurate, drift-free, pixel-perfect collision detection
-   * along the neck and entire body.
+   * Chain model: px[0] IS the head, so consecutive index pairs span the whole
+   * body including head→neck. Guarantees accurate, drift-free collision detection.
    */
   private updateSegsInGrid(p: Player): void {
     this.removeSegsFromGrid(p);
     const n = p.px.length;
-    if (n < 1) return;
+    if (n < 2) return;
     const keep: SegEntry[] = [];
-
-    // 1. Neck segment (from head to first body point)
-    const neckCells = this.grid.segmentCells(p.x, p.y, p.px[0]!, p.py[0]!);
-    const neckEntry: SegEntry = { p, i: -1, cells: neckCells };
-    this.grid.insertInto(neckCells, neckEntry);
-    keep.push(neckEntry);
-
-    // 2. Body segments along px/py
     for (let i = 0; i + 1 < n; i += C.BODY_SEGMENT_STRIDE) {
       const cells = this.grid.segmentCells(p.px[i]!, p.py[i]!, p.px[i + 1]!, p.py[i + 1]!);
       const e: SegEntry = { p, i, cells };
@@ -228,13 +292,22 @@ export class Session {
   }
 
   private safeSpawn(isHumanSpawner: boolean): [number, number] | null {
+    // Unified clearances (bots were previously held to HALF these distances
+    // in the fallback path, which let them materialize right in front of a
+    // moving snake). Predicted-head checks also keep spawns out of the path
+    // of anything barreling toward the spot.
+    const headClear = isHumanSpawner ? 420 : 380;
+    const bodyClear = isHumanSpawner ? 300 : 260;
     const nearBody = (x: number, y: number): boolean => {
       for (const p of this.players.values()) {
         if (!p.alive) continue;
-        const isHuman = !p.isBot;
-        const headClear = isHuman || isHumanSpawner ? 420 : 260;
-        const bodyClear = isHuman || isHumanSpawner ? 300 : 170;
         if (dist2(x, y, p.x, p.y) < headClear * headClear) return true;
+        // Where the head will be: prevX/Y is one tick of travel, so k=14
+        // ≈ 0.47s ahead at base speed (~80u) and k=30 ≈ 1s boosted (~320u).
+        const vx = p.x - p.prevX;
+        const vy = p.y - p.prevY;
+        if (dist2(x, y, p.x + vx * 14, p.y + vy * 14) < headClear * headClear) return true;
+        if (dist2(x, y, p.x + vx * 30, p.y + vy * 30) < headClear * headClear) return true;
         for (let i = 0; i < p.px.length; i += 2) {
           if (dist2(x, y, p.px[i]!, p.py[i]!) < bodyClear * bodyClear) return true;
         }
@@ -248,10 +321,11 @@ export class Session {
       const y = Math.sin(th) * rad;
       if (!nearBody(x, y)) return [x, y];
     }
-    // Fallback: farthest spot from heads AND bodies (stride 4). Only accept
-    // positions with at least the spawn clearance — if none exists the
-    // caller retries later instead of force-spawning onto a body.
-    const minClear = isHumanSpawner ? 300 : 170;
+    // Fallback: farthest spot from heads AND bodies (stride 4). The minimum
+    // accepted clearance is the FULL bodyClear for everyone — never the old
+    // 170u bot special-case that read as "spawned on top of me". If nothing
+    // clears it, the caller retries later instead of force-spawning.
+    const minClear = bodyClear;
     let best: [number, number] | null = null;
     let bestD = minClear * minClear;
     for (let i = 0; i < 40; i++) {
@@ -278,6 +352,7 @@ export class Session {
   }
 
   private tick(): void {
+    this.lastStepWallMs = Date.now();
     const now = performance.now();
     if (this.lastTickAt !== null) this.accMs += now - this.lastTickAt;
     else this.accMs = C.TICK_MS;
@@ -308,6 +383,10 @@ export class Session {
     try {
       this.tickNo++;
       const dt = C.TICK_MS / 1000;
+      // Hoisted once per tick — spawn-protection checks below compare against
+      // this instead of calling Date.now() per visited grid item / pair.
+      const nowMs = Date.now();
+      this.brTick(dt);
 
       const alive: Player[] = [];
       for (const p of this.players.values()) if (p.alive) alive.push(p);
@@ -334,8 +413,12 @@ export class Session {
       }
 
       for (const p of alive) {
-        if (p.x * p.x + p.y * p.y > this.halfW * this.halfW) {
-          this.killPlayer(p, null, true, false);
+        // Wall kill: the arena is a circle of radius halfW (halfH is kept
+        // equal and only broadcast for client-side math). Fresh-spawn
+        // protection applies here too — a protected snake gets the window to
+        // orient itself before the boundary turns lethal.
+        if (p.x * p.x + p.y * p.y > this.halfW * this.halfW && nowMs >= p.spawnProtectUntil) {
+          this.killPlayer(p, null, true);
         }
       }
 
@@ -358,12 +441,19 @@ export class Session {
               this.food.remove(item.id);
               p.eat(item.value);
             }
-          } else if (item.p !== p) {
+          } else if (
+            item.p !== p &&
+            nowMs >= item.p.spawnProtectUntil &&
+            nowMs >= p.spawnProtectUntil
+          ) {
+            // Protected snakes are harmless AND invulnerable: their bodies
+            // can't kill (no free shield-ramming) and their head can't die.
             const seg = item;
-            const x1 = seg.i === -1 ? seg.p.x : seg.p.px[seg.i]!;
-            const y1 = seg.i === -1 ? seg.p.y : seg.p.py[seg.i]!;
-            const x2 = seg.i === -1 ? seg.p.px[0]! : seg.p.px[seg.i + 1]!;
-            const y2 = seg.i === -1 ? seg.p.py[0]! : seg.p.py[seg.i + 1]!;
+            // Chain model: plain 0-based segment pairs (no legacy -1 neck case).
+            const x1 = seg.p.px[seg.i]!;
+            const y1 = seg.p.py[seg.i]!;
+            const x2 = seg.p.px[seg.i + 1]!;
+            const y2 = seg.p.py[seg.i + 1]!;
             const d2 = pointSegDist2(p.x, p.y, x1, y1, x2, y2);
             // Body radius thick*0.5 matches the rendered box width.
             // If the head's front edge touches the opponent's body segment:
@@ -372,7 +462,7 @@ export class Session {
               const headTouch =
                 seg.i <= 0 &&
                 dist2(p.x, p.y, q.x, q.y) < (p.headRadius() + q.headRadius()) ** 2;
-              if (!headTouch) this.killPlayer(p, q, false, false);
+              if (!headTouch) this.killPlayer(p, q, false);
             }
           }
         });
@@ -386,6 +476,9 @@ export class Session {
           const b = stillAlive[j]!;
           const rr = a.headRadius() + b.headRadius();
           if (dist2(a.x, a.y, b.x, b.y) >= rr * rr) continue;
+          // Spawn protection applies to head-on clashes too — neither party
+          // can die while protected (no shield-ramming in either direction).
+          if (nowMs < a.spawnProtectUntil || nowMs < b.spawnProtectUntil) continue;
           // Head-to-head: only the first toucher dies (the head that bites
           // the other first), the survivor gets the kill credit. Resolved
           // by each head's closing speed toward the other over this tick —
@@ -408,11 +501,11 @@ export class Session {
             loser = a.targetLen <= b.targetLen ? a : b;
             winner = loser === a ? b : a;
           }
-          this.killPlayer(loser, winner, false, false);
+          this.killPlayer(loser, winner, false);
         }
       }
 
-      const targetFood = Math.min(C.FOOD_CAP, Math.max(1800, this.aliveCount * C.FOOD_PER_ACTOR));
+      const targetFood = Math.min(C.FOOD_CAP, Math.max(1800, stillAlive.length * C.FOOD_PER_ACTOR));
       const missing = targetFood - this.food.items.size;
       if (missing > 0) {
         this.food.queueSpawn(Math.min(missing, C.FOOD_SPAWN_PER_TICK));
@@ -426,50 +519,91 @@ export class Session {
         this.lastLbAt = Date.now();
         this.broadcastLeaderboard();
       }
+      // Reached only on a fully successful step — any throw above leaves
+      // the streak elevated for /health to surface.
+      this.tickErrStreak = 0;
     } catch (err) {
+      this.tickErrStreak++;
       console.error("[session] tick error", err);
     }
     const dt = performance.now() - t0;
     this.perfAcc += dt;
     this.perfSamples++;
-    if (Date.now() - this.lastPerfLog > 10_000 && process.env.STRESS === "1") {
+    // Rolling perf summary: 10 s cadence under STRESS for tuning, a quiet
+    // 60 s heartbeat in production so incidents are diagnosable from logs
+    // alone (previously production was completely mute here).
+    const logEveryMs = process.env.STRESS === "1" ? 10_000 : 60_000;
+    if (this.perfSamples >= 30 && Date.now() - this.lastPerfLog > logEveryMs) {
       this.lastPerfLog = Date.now();
-      const line =
+      console.log(
         `[perf] ${this.id}: ${(this.perfAcc / this.perfSamples).toFixed(2)}ms/tick, ` +
-        `${this.players.size} players, ${this.aliveCount} alive, ${this.food.items.size} food, ${r1(this.halfW)} half\n`;
-      try {
-        fsSyncWrite(line);
-      } catch {
-        /* noop */
-      }
+        `${this.players.size} players, ${this.aliveCount} alive, ` +
+        `${this.food.items.size} food, errStreak=${this.tickErrStreak}`
+      );
       this.perfAcc = 0;
       this.perfSamples = 0;
     }
   }
 
-  /** Periodic authoritative food re-sync per client: every FOOD_SYNC_MS
-      each client's view is replaced with exactly the food that exists near
-      them, wiping out ghosts from filtered events. */
+  /** Periodic authoritative food re-sync per client: every FOOD_SYNC_MS the
+      client's view is DIFFED against what it was already told (foodKnown):
+      only newly-visible items are sent as "s" rows and items that vanished
+      unseen are sent as "r" ids. Wipes out ghosts from events filtered while
+      the client was far away, without re-shipping the whole view (~40KB per
+      desktop client) every 10 s. Items that merely left the view are kept in
+      foodKnown silently — the client still has them and no removal event
+      was ever emitted for them. */
+  /** Interest focus for a client: its own snake — or, while dead with a
+      valid spectate target, the watched LIVE player (spectate death-cam
+      needs the server to keep streaming what the client is watching). */
+  private interestFocus(c: ClientHandle, pid: number): Player | undefined {
+    const me = this.players.get(pid);
+    if (!me || me.alive || !c.spectatePid) return me;
+    const sp = this.players.get(c.spectatePid);
+    return sp && sp.alive ? sp : me;
+  }
+
   private foodKeepSync(): void {
     if (Date.now() - this.lastFoodSyncAt < C.FOOD_SYNC_MS) return;
     this.lastFoodSyncAt = Date.now();
     const now = Date.now();
     for (const [pid, c] of this.clients) {
-      const me = this.players.get(pid);
+      const me = this.interestFocus(c, pid);
       if (!me) continue;
-      const r = Math.max(C.VIEW_HALF, c.viewR);
+      const r = c.viewR + C.INTEREST_SAFETY;
       const v2 = r * r;
+      const seen = new Set<number>();
       const rows: string[] = [];
       this.grid.forEachNear(me.x, me.y, r, (item) => {
         if (!(item instanceof FoodItem)) return;
         const dx = item.x - me.x;
         const dy = item.y - me.y;
         if (dx * dx + dy * dy <= v2) {
-          const isDrop = item.isDeathDrop && (now - item.dropAt < 4000) ? 1 : 0;
-          rows.push(`[${item.id},${r1(item.x)},${r1(item.y)},${item.colorIdx},${isDrop}]`);
+          seen.add(item.id);
+          if (!c.foodKnown.has(item.id)) {
+            rows.push(foodRow(item, now));
+            c.foodKnown.add(item.id);
+          }
         }
       });
-      c.send(`{"t":"f","k":[${rows.join(",")}]}`);
+      const gone: number[] = [];
+      for (const id of c.foodKnown) {
+        if (seen.has(id)) continue;
+        const item = this.food.items.get(id);
+        if (item) {
+          // Still exists — just outside the current view circle. The client
+          // never got a removal for it, so keep it known; it will be
+          // reported gone on a later sync if it really despawned.
+          const dx = item.x - me.x;
+          const dy = item.y - me.y;
+          if (dx * dx + dy * dy > v2) continue;
+        }
+        c.foodKnown.delete(id);
+        gone.push(id);
+      }
+      if (rows.length > 0 || gone.length > 0) {
+        c.send(`{"t":"f","s":[${rows.join(",")}],"r":[${gone.join(",")}]}`);
+      }
     }
   }
 
@@ -496,15 +630,13 @@ export class Session {
     }
   }
 
-  private killPlayer(p: Player, killer: Player | null, wall: boolean, silent: boolean): void {
+  private killPlayer(p: Player, killer: Player | null, wall: boolean): void {
     if (!p.alive) return;
     p.die(wall ? "wall" : "crash");
-    if (killer && killer.alive && !silent) killer.kills++;
-    if (!silent) {
-      for (const drop of p.dropPositions()) this.food.addDeathDrop(drop.x, drop.y, p.colorIdx, drop.val);
-      this.killfeeds.push({ killer, victim: p, wall });
-      this.deathEvents.push({ victim: p, x: p.x, y: p.y });
-    }
+    if (killer && killer.alive) killer.kills++;
+    for (const drop of p.dropPositions()) this.food.addDeathDrop(drop.x, drop.y, p.colorIdx, drop.val);
+    this.killfeeds.push({ killer, victim: p, wall });
+    this.deathEvents.push({ victim: p, x: p.x, y: p.y });
     if (!p.isBot) {
       let rank = 1;
       for (const q of this.players.values()) {
@@ -516,62 +648,150 @@ export class Session {
         maxLen: Math.round(p.targetLen),
         rank,
         killerName: killer ? killer.name : null,
+        killerId: killer ? killer.id : 0,
         wall,
       });
     }
     if (p.isBot) (p as Bot).scheduleRespawn();
   }
 
+  /** Battle-Royale collapse driver (see PHASES.md §BR). Steps the target
+      radius down on a timer, eases halfW toward it at BR_WALL_SPEED, holds
+      at the floor, crowns the #1 as CHAMPION, then re-expands. Fully
+      server-timed — clients render everything from existing fields. */
+  private brTick(dt: number): void {
+    // Battle-Royale collapse only runs in “br”-mode arenas. Classic arenas
+    // keep the constant slither-io style map.
+    if (this.mode !== "br") return;
+    const now = Date.now();
+
+    if (this.brHoldUntil > 0) {
+      if (now >= this.brHoldUntil) {
+        // Crown whoever leads when the collapse completes.
+        let champ: Player | null = null;
+        for (const p of this.players.values()) {
+          if (p.alive && (!champ || p.targetLen > champ.targetLen)) champ = p;
+        }
+        if (champ) this.pendingChamp = { id: champ.id, name: champ.name };
+        this.brTargetHalfW = C.WORLD_HALF;
+        this.brHoldUntil = 0;
+        this.brNextShrinkAt = now + C.BR_SHRINK_INTERVAL_MS;
+      }
+    } else if (now >= this.brNextShrinkAt) {
+      const target = Math.max(
+        C.BR_MIN_HALFW,
+        Math.round(this.brTargetHalfW * C.BR_SHRINK_FACTOR),
+      );
+      if (target < this.brTargetHalfW - 1) {
+        this.brTargetHalfW = target;
+        this.purgeFoodOutside(target);
+        this.brNextShrinkAt = now + C.BR_SHRINK_INTERVAL_MS;
+      } else {
+        // Floor reached — hold tight, then crown and re-expand.
+        this.brHoldUntil = now + C.BR_HOLD_MS;
+      }
+    }
+
+    // Ease the live wall toward its target (linear, capped speed).
+    const rate = C.BR_WALL_SPEED * dt;
+    if (this.halfW > this.brTargetHalfW) {
+      this.halfW = Math.max(this.brTargetHalfW, this.halfW - rate);
+    } else if (this.halfW < this.brTargetHalfW) {
+      this.halfW = Math.min(this.brTargetHalfW, this.halfW + rate);
+    }
+    this.halfH = this.halfW;
+  }
+
+  /** Drop natural/drop food that the collapsed wall left unreachable, so the
+      FOOD_CAP economy keeps feeding the playable area. Batched through the
+      normal removal path → clients get ordinary removal events. */
+  private purgeFoodOutside(radius: number): void {
+    const r2 = (radius + 60) * (radius + 60);
+    const dead: number[] = [];
+    for (const f of this.food.items.values()) {
+      if (f.x * f.x + f.y * f.y > r2) dead.push(f.id);
+    }
+    for (const id of dead) this.food.remove(id);
+  }
+
   private broadcastState(): void {
     // Serialize each alive player's row once per tick, then hand each
-    // client only the rows inside its view. Names are SAFE_NAME-validated
-    // (no quotes/backslashes), so rows can be built as raw strings.
+    // client only the rows inside its view. Index 11 is an EMPTY string:
+    // no client ever read names from these rows (lb/kf/dead messages carry
+    // names where they matter), so embedding them 30Ã—/s per visible player
+    // was pure bandwidth. The slot stays for wire-format stability.
+    //
+    // Two row variants per player: the FULL row carries the packed color
+    // chain (up to 11 digits) and is sent only on first sight after an
+    // interest-entry; the SLIM row carries 0 in that slot (= "unchanged",
+    // clients keep their cached value and ignore repeats). colorIdx is
+    // immutable per player id, so once-per-connection-per-id is exact.
     const rowBuf = new Map<number, string>();
+    const rowBufSlim = new Map<number, string>();
+    // Max distance from head to any sampled body point, per player, once
+    // per tick. Lets the per-client interest test be a single bounding
+    // check instead of a body walk per client per player (O(CÂ·PÂ·L/8) ->
+    // O(PÂ·L/8) + O(CÂ·P)).
+    const bodyReach = new Map<number, number>();
     for (const p of this.players.values()) {
       if (!p.alive) continue;
-      rowBuf.set(
-        p.id,
-        `[${p.id},${r1(p.x)},${r1(p.y)},${r1(p.angle)},${r1(p.targetLen)},${r1(p.thick)},` +
-          `${p.colorIdx},${p.patternIdx},${p.isBot ? 1 : 0},0,${p.kills},"${p.name}"]`,
-      );
+      const head = `[${p.id},${Math.round(p.x)},${Math.round(p.y)},${r1(p.angle)},${r1(p.targetLen)},${r1(p.thick)},`;
+      // Slot 9 is the spawn-protection flag (previously a constant "0" —
+      // zero wire-format change, old clients just ignore it).
+      const tail = `${p.patternIdx},${p.isBot ? 1 : 0},${p.isProtected() ? 1 : 0},${p.kills},""]`;
+      rowBuf.set(p.id, `${head}${p.colorIdx},${tail}`);
+      rowBufSlim.set(p.id, `${head}0,${tail}`);
+      let maxD2 = 0;
+      for (let i = 0; i < p.px.length; i += 8) {
+        const dx = p.px[i]! - p.x;
+        const dy = p.py[i]! - p.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > maxD2) maxD2 = d2;
+      }
+      bodyReach.set(p.id, Math.sqrt(maxD2));
     }
     const base = `{"t":"s","tk":${this.tickNo},"w":[${r1(this.halfW)},${r1(this.halfH)}],"p":[`;
     const bodyCadence = this.tickNo % 3 === 0; // ~10 TPS authoritative refresh
     for (const [pid, c] of this.clients) {
-      const me = this.players.get(pid);
+      const me = this.interestFocus(c, pid);
       if (!me) continue;
-      const r = Math.max(C.VIEW_HALF, c.viewR);
+      // viewR was clamped to [VIEW_FLOOR, VIEW_MAX] at join/view time —
+      // no per-tick re-clamping needed.
+      const r = c.viewR + C.INTEREST_SAFETY;
       const v2 = r * r;
       let rows = "";
       let first = true;
       const bodyRows: string[] = [];
       for (const [id, row] of rowBuf) {
         const q = this.players.get(id)!;
-        // Sync a player if its head OR any coarse body point is within the
-        // view radius: a long body can sweep across the client's screen even
-        // when the head is far away. Without this the body would pop in and
-        // out invisibly (and kill heads with no visible body to dodge).
-        let dx = q.x - me.x;
-        let dy = q.y - me.y;
-        let inView = dx * dx + dy * dy <= v2;
+        // Sync a player if its head OR any body point is within the view
+        // radius: a long body can sweep across the client's screen even
+        // when the head is far away. The body test uses the precomputed
+        // reach circle (a conservative superset of the point walk).
+        const dx = q.x - me.x;
+        const dy = q.y - me.y;
+        const dh2 = dx * dx + dy * dy;
+        let inView = dh2 <= v2;
         if (!inView) {
-          for (let i = 0; i < q.px.length; i += 8) {
-            dx = q.px[i]! - me.x;
-            dy = q.py[i]! - me.y;
-            if (dx * dx + dy * dy <= v2) {
-              inView = true;
-              break;
-            }
-          }
+          const reach = r + (bodyReach.get(id) ?? 0);
+          inView = dh2 <= reach * reach;
         }
         if (inView) {
+          // Distance tiering: actors beyond TIER_DIST stream at half rate
+          // (~15Hz). The client's velocity extrapolation absorbs sub-100ms
+          // row gaps by design; INTEREST_SAFETY means PRESENCE data is never
+          // delayed - only refreshes of already-visible snakes are spaced.
+          if (dh2 > TIER_DIST2 && this.tickNo % 2 !== 0) continue;
+          // First sight carries the real packed color; afterwards the slim
+          // row (0 = unchanged). known is hoisted so both the row choice and
+          // the body logic below share it.
+          const known = c.bodyKnown.has(id);
           if (!first) rows += ",";
-          rows += row;
+          rows += known ? rowBufSlim.get(id)! : row;
           first = false;
           // Authoritative body: send on first entry into view (before a
           // newly relevant snake can kill this client), on the ~10 TPS
           // cadence while visible, and immediately on significant growth.
-          const known = c.bodyKnown.has(id);
           const grew = q.targetLen - (this.bodyLenAt.get(id) ?? 0) > C.BODY_GROWTH_RESEND;
           if (!known || bodyCadence || grew) {
             const bRow = this.bodyRow(q);
@@ -591,85 +811,117 @@ export class Session {
     }
   }
 
-  /** Sample a player's path head->tail every BODY_SAMPLE_DIST units,
-      capped at BODY_SAMPLE_CAP points. px[0] is the head. Returns null when
-      the path is too short to yield a single sample (fresh spawns) — an
-      empty row would emit `[id,x,y,]` and break JSON parsing. */
+  /** Sample a player's ENTIRE path head->tail, adaptively strided so every
+      point of the authoritative body reaches clients no matter how long the
+      snake is. The old fixed 22-unit sampling silently truncated bodies
+      longer than BODY_SAMPLE_CAP×22 ≈ 3080 units — those unseen sections were
+      still lethal server-side (the "invisible killer" reports). Worst-case
+      spacing for a MAX_POINTS(800)-point snake is ~60 units, whose chord
+      sagitta on even the tightest turn radius (~60u) is ~8u — far below one
+      rendered block. Returns null when the path is too short to yield a
+      single sample (fresh spawns) — an empty row would emit `[id,x,y,]` and
+      break JSON parsing. */
   private bodyRow(p: Player): string | null {
+    const n = p.px.length;
+    if (n < 2) return null;
+    const stride = Math.max(1, Math.ceil(n / C.BODY_SAMPLE_CAP));
     const pts: number[] = [];
-    let lastX = p.x;
-    let lastY = p.y;
-    let acc = 0;
-    let emitted = 1;
-    for (let i = 0; i < p.px.length && emitted < C.BODY_SAMPLE_CAP; i++) {
-      const dx = p.px[i]! - lastX;
-      const dy = p.py[i]! - lastY;
-      acc += Math.hypot(dx, dy);
-      if (acc >= C.BODY_SAMPLE_DIST) {
-        pts.push(r1(p.px[i]!), r1(p.py[i]!));
-        emitted++;
-        acc = 0;
-        lastX = p.px[i]!;
-        lastY = p.py[i]!;
-      }
+    let lastEmitted = -1;
+    for (let i = stride; i < n; i += stride) {
+      pts.push(r1(p.px[i]!), r1(p.py[i]!));
+      lastEmitted = i;
+    }
+    // Always close with the true tail tip so nothing trails unstreamed.
+    if (lastEmitted !== n - 1 && lastEmitted !== -1) {
+      pts.push(r1(p.px[n - 1]!), r1(p.py[n - 1]!));
     }
     if (pts.length === 0) return null;
     return `[${p.id},${r1(p.x)},${r1(p.y)},${pts.join(",")}]`;
   }
 
   private flushEvents(): void {
-    const { s, r, sItems, rItems } = this.food.flushEvents();
+    const { r, sItems, rItems } = this.food.flushEvents();
 
     // Differential grid sync: food spawned this tick (fill + death drops)
-    // enters the collision grid, eaten food leaves it.
+    // enters the collision grid, eaten food leaves it. Runs every tick.
     for (const f of sItems) this.grid.insert(f.x, f.y, f);
     for (const f of rItems) this.grid.remove(f.x, f.y, f);
 
-    if (s.length > 0 || r.length > 0) {
-      const now = Date.now();
-      for (const [pid, c] of this.clients) {
-        const me = this.players.get(pid);
-        if (!me) continue;
-        const vr = Math.max(C.VIEW_HALF, c.viewR);
-        const v2 = vr * vr;
-        const sRows: string[] = [];
-        for (const f of sItems) {
-          const dx = f.x - me.x;
-          const dy = f.y - me.y;
-          if (dx * dx + dy * dy <= v2) {
-            const isDrop = f.isDeathDrop && (now - f.dropAt < 4000) ? 1 : 0;
-            sRows.push(`[${f.id},${r1(f.x)},${r1(f.y)},${f.colorIdx},${isDrop}]`);
-          }
-        }
-        const rIds: number[] = [];
-        for (let i = 0; i < r.length; i++) {
-          const f = rItems[i];
-          if (f) {
+    // Accumulate events across the batch window (an item spawned and eaten
+    // within the window appears in both lists; clients apply "s" before
+    // "r", so it resolves correctly), then flush per-client messages only
+    // every FOOD_EVENT_BATCH ticks (~5 Hz) — a 32/tick food fill must not
+    // become a 30 TPS message flood.
+    for (const f of sItems) this.batchSpawned.push(f);
+    for (let i = 0; i < r.length; i++) {
+      const f = rItems[i];
+      if (f) this.batchRemoved.push({ id: r[i]!, x: f.x, y: f.y });
+    }
+
+    if (this.tickNo % C.FOOD_EVENT_BATCH === 0) {
+      if (this.batchSpawned.length > 0 || this.batchRemoved.length > 0) {
+        const now = Date.now();
+        for (const [pid, c] of this.clients) {
+          const me = this.interestFocus(c, pid);
+          if (!me) continue;
+          const vr = c.viewR + C.INTEREST_SAFETY;
+          const v2 = vr * vr;
+          const sRows: string[] = [];
+          for (const f of this.batchSpawned) {
             const dx = f.x - me.x;
             const dy = f.y - me.y;
-            if (dx * dx + dy * dy <= v2) rIds.push(r[i]!);
+            if (dx * dx + dy * dy <= v2) {
+              sRows.push(foodRow(f, now));
+              c.foodKnown.add(f.id);
+            }
+          }
+          const rIds: number[] = [];
+          for (const e of this.batchRemoved) {
+            const dx = e.x - me.x;
+            const dy = e.y - me.y;
+            if (dx * dx + dy * dy <= v2) {
+              rIds.push(e.id);
+              c.foodKnown.delete(e.id);
+            }
+          }
+          if (sRows.length > 0 || rIds.length > 0) {
+            c.send(`{"t":"f","s":[${sRows.join(",")}],"r":[${rIds.join(",")}]}`);
           }
         }
-        if (sRows.length > 0 || rIds.length > 0) {
-          c.send(`{"t":"f","s":[${sRows.join(",")}],"r":[${rIds.join(",")}]}`);
-        }
       }
+      this.batchSpawned = [];
+      this.batchRemoved = [];
     }
     if (this.killfeeds.length) {
+      // Clients only ever display their own kills, so build per-client
+      // messages instead of broadcasting everyone's feed to everyone.
+      for (const [pid, c] of this.clients) {
+        const mine = this.killfeeds.filter((e) => e.killer !== null && e.killer.id === pid);
+        if (mine.length === 0) continue;
+        c.send(JSON.stringify({
+          t: "kf",
+          k: mine.map((e) => [
+            e.killer!.id,
+            e.killer!.name,
+            e.victim.name,
+            e.wall ? 1 : 0,
+            e.killer!.colorIdx,
+            e.victim.colorIdx,
+            e.victim.id,
+          ]),
+        }));
+      }
+      this.killfeeds = [];
+    }
+    // Champion announcement: one tiny broadcast per BR round end.
+    if (this.pendingChamp) {
       const msg = JSON.stringify({
-        t: "kf",
-        k: this.killfeeds.map((e) => [
-          e.killer ? e.killer.id : -1,
-          e.killer ? e.killer.name : null,
-          e.victim.name,
-          e.wall ? 1 : 0,
-          e.killer ? e.killer.colorIdx : -1,
-          e.victim.colorIdx,
-          e.victim.id,
-        ]),
+        t: "champ",
+        n: this.pendingChamp.name,
+        id: this.pendingChamp.id,
       });
       for (const c of this.clients.values()) c.send(msg);
-      this.killfeeds = [];
+      this.pendingChamp = null;
     }
     // Real deaths (client deletes + plays death FX). Absence from the
     // interest-filtered `s` broadcast is NOT death, so this is the only
@@ -701,9 +953,12 @@ export class Session {
     for (const c of this.clients.values()) c.send(msg);
   }
 
-  /** Nearby food snapshot for a freshly joined client (their spawn view). */
-  foodSnapshot(p: Player, viewR: number): string {
-    const r = Math.max(C.VIEW_HALF, viewR);
+  /** Nearby food snapshot for a freshly joined client (their spawn view).
+      `viewR` must already be clamped by the caller (join path does). Every
+      row id is also seeded into `known` so the diff-based keep-sync starts
+      from an accurate picture of what this client has. */
+  foodSnapshot(p: Player, viewR: number, known: Set<number>): string {
+    const r = viewR;
     const v2 = r * r;
     const now = Date.now();
     const rows: string[] = [];
@@ -711,8 +966,8 @@ export class Session {
       const dx = f.x - p.x;
       const dy = f.y - p.y;
       if (dx * dx + dy * dy <= v2) {
-        const isDrop = f.isDeathDrop && (now - f.dropAt < 4000) ? 1 : 0;
-        rows.push(`[${f.id},${r1(f.x)},${r1(f.y)},${f.colorIdx},${isDrop}]`);
+        rows.push(foodRow(f, now));
+        known.add(f.id);
       }
     }
     return `{"t":"foods","f":[${rows.join(",")}]}`;

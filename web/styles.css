@@ -35,8 +35,11 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: var(--bg-dark);
-  color: var(--ink);
+  background:
+    radial-gradient(140% 100% at 50% 120%, rgba(124, 92, 255, 0.08), transparent 55%),
+    radial-gradient(100% 80% at 50% -20%, rgba(0, 194, 209, 0.06), transparent 50%),
+    var(--bg-dark);
+  color: var(--cream);
   font-family: var(--font-main);
   font-weight: 700;
 }
@@ -56,6 +59,29 @@ html, body {
   width: 100%;
   height: 100%;
   display: block;
+  /* Steering drags must never scroll/zoom the page on touch devices. */
+  touch-action: none;
+}
+
+/* Cinematic vignette above the canvas, below HUD (z:5) and overlays (z:50).
+   Pure CSS — zero per-frame JS cost. */
+#app::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: radial-gradient(
+    115% 90% at 50% 42%,
+    transparent 55%,
+    rgba(2, 4, 12, 0.5) 100%
+  );
+}
+
+/* Universal visibility toggle — without this, non-overlay elements using
+   .hidden (HUD, joystick) stayed visible behind translucent overlays. */
+.hidden {
+  display: none !important;
 }
 
 /* ==========================================================================
@@ -67,9 +93,11 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(9, 13, 30, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background:
+    radial-gradient(120% 100% at 50% 0%, rgba(0, 194, 209, 0.05), transparent 50%),
+    rgba(6, 9, 20, 0.88);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
   z-index: 50;
   padding: 14px;
   transition: opacity 0.2s ease;
@@ -80,30 +108,59 @@ html, body {
   display: none !important;
 }
 
+/* Keyboard accessibility: visible focus rings on every interactive element. */
+button:focus-visible,
+.swatch:focus-visible,
+.input:focus-visible {
+  outline: 3px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* Respect users who opt out of motion: entrances resolve instantly and all
+   idle/ambient animation stops. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 .panel {
-  background: var(--cream-card);
-  border: var(--border-thick);
-  box-shadow: var(--shadow-xl);
-  border-radius: 16px;
+  background: linear-gradient(180deg, #101a3d 0%, #0b1129 100%);
+  border: 2px solid rgba(255, 248, 231, 0.14);
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border-radius: 18px;
   position: relative;
 }
 
 /* ==========================================================================
-   LANDSCAPE ARCADE DECK (Modern 2-Column Desktop & Tablet Layout)
+   ARCADE DECK — dark premium landing built around the CHAIN motif
    ========================================================================== */
 .arcade-deck {
-  width: 96%;
-  max-width: 800px;
+  width: min(96%, 860px);
   max-height: 94dvh;
-  background: var(--cream-card);
-  border: var(--border-thick);
-  box-shadow: var(--shadow-xl), 0 24px 48px rgba(0, 0, 0, 0.55);
-  border-radius: 20px;
-  padding: 20px 24px;
+  background:
+    radial-gradient(120% 90% at 50% -10%, rgba(124, 92, 255, 0.10), transparent 60%),
+    linear-gradient(180deg, #101a3d 0%, #0b1129 100%);
+  border: 2px solid rgba(255, 248, 231, 0.12);
+  border-radius: 22px;
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  padding: clamp(14px, 2.4vw, 26px);
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  overflow: hidden;
+  gap: clamp(10px, 1.6vw, 18px);
+  /* Tiny/short viewports: scroll instead of silently clipping content. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
   animation: deckPop 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.2);
 }
 
@@ -112,35 +169,111 @@ html, body {
   100% { transform: scale(1) translateY(0); opacity: 1; }
 }
 
+/* Staggered entrance for the deck's main sections (topbar -> panels). */
+.deck-topbar,
+.deck-left,
+.deck-right,
+.hero-brand {
+  animation: deckChildIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.2) both;
+}
+.deck-topbar { animation-delay: 0.05s; }
+.hero-brand  { animation-delay: 0.12s; }
+.deck-left   { animation-delay: 0.16s; }
+.deck-right  { animation-delay: 0.22s; }
+
+@keyframes deckChildIn {
+  0% { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ==========================================================================
+   ANIMATED MENU BACKDROP — drifting chain-link plates + soft glow orbs on a
+   faint diagonal lattice. Children injected once by JS; hidden with menu.
+   ========================================================================== */
+.menu-backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(115deg, rgba(255, 255, 255, 0.028) 0 2px, transparent 2px 26px),
+    radial-gradient(90% 70% at 50% 0%, rgba(0, 194, 209, 0.08), transparent 55%);
+}
+
+.bd-orb {
+  position: absolute;
+  width: 340px;
+  height: 340px;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.26;
+  animation: orbDrift 16s ease-in-out infinite alternate;
+}
+
+@keyframes orbDrift {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(70px, -50px) scale(1.15); }
+}
+
+/* Chain-link plates: rounded steel squares with a punched center hole. */
+.bd-cube {
+  position: absolute;
+  border: 3px solid rgba(255, 248, 231, 0.85);
+  border-radius: 32%;
+  box-shadow:
+    inset 0 0 0 4px rgba(7, 11, 24, 0.9),
+    0 4px 14px rgba(0, 0, 0, 0.35);
+  opacity: 0.32;
+  animation:
+    cubeFloat var(--dur, 12s) ease-in-out var(--delay, 0s) infinite alternate,
+    cubeSpin var(--spin, 18s) linear var(--delay, 0s) infinite;
+}
+
+.bd-cube::after {
+  content: "";
+  position: absolute;
+  inset: 22%;
+  border-radius: inherit;
+  background: rgba(7, 11, 24, 0.85);
+}
+
+@keyframes cubeFloat {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(var(--dx, 30px), var(--dy, -46px)); }
+}
+
+@keyframes cubeSpin {
+  0% { rotate: 0deg; }
+  100% { rotate: var(--rot, 360deg); }
+}
+
 /* TOP STATUS BAR */
 .deck-topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 12px;
-  border-bottom: 2px dashed rgba(20, 20, 20, 0.2);
+  padding-bottom: 10px;
+  border-bottom: 1px dashed rgba(255, 248, 231, 0.14);
 }
 
 .brand-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .live-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: var(--white);
-  border: var(--border-sm);
-  box-shadow: 2px 2px 0 var(--ink);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.45);
   border-radius: 999px;
   padding: 3px 10px;
   font-size: 10.5px;
   font-weight: 900;
-  color: var(--ink);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
+  color: #34D399;
+  letter-spacing: 0.6px;
 }
 
 .live-dot {
@@ -148,7 +281,27 @@ html, body {
   height: 7px;
   background: #10B981;
   border-radius: 50%;
+  box-shadow: 0 0 8px #10B981;
   animation: pulseDot 1.4s ease-in-out infinite;
+}
+
+/* Connection health reflected by the menu pill (set from ui.setServerStatus). */
+.live-pill.st-connecting .live-dot {
+  background: var(--yellow);
+  box-shadow: 0 0 8px var(--yellow);
+}
+
+.live-pill.st-offline .live-dot {
+  background: var(--red);
+  box-shadow: none;
+  animation: none;
+}
+
+.live-pill.st-offline {
+  color: #F87171;
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(239, 68, 68, 0.10);
+  opacity: 0.9;
 }
 
 @keyframes pulseDot {
@@ -156,6 +309,52 @@ html, body {
   50% { transform: scale(1.4); opacity: 0.4; }
 }
 
+/* Live arena population from GET /health (ui.startOnlineCounter). */
+.online-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 194, 209, 0.10);
+  border: 1px solid rgba(0, 194, 209, 0.35);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 10.5px;
+  font-weight: 900;
+  color: #67E8F9;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.online-pill.hot {
+  box-shadow: 0 0 12px rgba(0, 194, 209, 0.25);
+}
+
+.btn-icon {
+  background: rgba(255, 248, 231, 0.06);
+  border: 1.5px solid rgba(255, 248, 231, 0.18);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-family: var(--font-main);
+  font-size: 11px;
+  font-weight: 900;
+  color: var(--cream);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: transform 0.08s ease, background 0.08s ease;
+}
+
+.btn-icon:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 248, 231, 0.12);
+}
+
+.btn-icon:active {
+  transform: translateY(1px);
+}
+
+/* Stickers live on the DEATH overlay (kept from the previous design). */
 .sticker-tag {
   background: var(--pink);
   color: var(--ink);
@@ -178,38 +377,11 @@ html, body {
   padding: 4px 12px;
 }
 
-.btn-icon {
-  background: var(--white);
-  border: var(--border-sm);
-  box-shadow: 2px 2px 0 var(--ink);
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-family: var(--font-main);
-  font-size: 11px;
-  font-weight: 900;
-  color: var(--ink);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
-}
-
-.btn-icon:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--ink);
-}
-
-.btn-icon:active {
-  transform: translate(1px, 1px);
-  box-shadow: 0 0 0;
-}
-
 /* 2-COLUMN LANDSCAPE BODY */
 .deck-body {
   display: grid;
-  grid-template-columns: 1.15fr 1fr;
-  gap: 22px;
+  grid-template-columns: 1.08fr 0.92fr;
+  gap: clamp(14px, 2vw, 24px);
   align-items: center;
 }
 
@@ -219,7 +391,7 @@ html, body {
   gap: 12px;
 }
 
-/* LEFT PANEL: SNAKE STAGE & PALETTE */
+/* LEFT PANEL: CHAIN FORGE */
 .panel-top-bar {
   display: flex;
   align-items: center;
@@ -229,148 +401,287 @@ html, body {
 .panel-badge {
   font-size: 11px;
   font-weight: 900;
-  color: var(--ink);
-  background: var(--yellow);
-  border: var(--border-sm);
-  box-shadow: 2px 2px 0 var(--ink);
+  color: var(--yellow);
+  background: rgba(255, 217, 61, 0.08);
+  border: 1px solid rgba(255, 217, 61, 0.35);
   border-radius: 6px;
-  padding: 2px 8px;
+  padding: 3px 8px;
   letter-spacing: 0.5px;
 }
 
 .chain-status {
   font-size: 10px;
   font-weight: 900;
-  color: rgba(20, 20, 20, 0.7);
+  color: rgba(255, 248, 231, 0.55);
   letter-spacing: 0.4px;
   text-transform: uppercase;
 }
 
-/* WIDE SNAKE STAGE CANVAS */
+/* Micro pop whenever the chain length text changes (swatch taps). */
+.chain-status.pop {
+  animation: statusPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.4);
+}
+
+@keyframes statusPop {
+  0% { transform: scale(0.85); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Swatch tap feedback — one-shot bounce on the tapped swatch. */
+.swatch.pop {
+  animation: swatchPop 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.5);
+}
+
+@keyframes swatchPop {
+  0% { transform: scale(1); }
+  45% { transform: scale(1.22); }
+  100% { transform: scale(1); }
+}
+
+/* WIDE SLITHER PREVIEW STAGE — dark tank with a dotted grid + top sheen. */
 .snake-stage {
+  position: relative;
   width: 100%;
-  height: 120px;
-  background: #F4EEDC;
-  background-image: 
-    radial-gradient(rgba(20, 20, 20, 0.12) 1.2px, transparent 1.2px);
-  background-size: 16px 16px;
-  border: var(--border);
-  box-shadow: inset 3px 3px 6px rgba(0, 0, 0, 0.08), var(--shadow-sm);
-  border-radius: 12px;
+  height: clamp(96px, 15vh, 132px);
+  background:
+    radial-gradient(rgba(255, 248, 231, 0.07) 1.2px, transparent 1.2px),
+    linear-gradient(180deg, #0a1024, #0d1430);
+  background-size: 16px 16px, 100% 100%;
+  border: 1.5px solid rgba(255, 248, 231, 0.14);
+  box-shadow:
+    inset 0 0 40px rgba(0, 0, 0, 0.45),
+    inset 0 0 60px rgba(0, 194, 209, 0.05);
+  border-radius: 14px;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+.stage-sheen {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, 0.05) 50%, transparent 70%);
+  animation: stageSheen 5.5s ease-in-out infinite;
+}
+
+@keyframes stageSheen {
+  0%, 55% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+
 .snake-stage canvas {
   width: 100%;
   height: 100%;
   display: block;
+  touch-action: none;
 }
 
-/* PALETTE DOCK */
+/* CHAIN SLOT STRIP — filled links + dashed empty slots under the stage. */
+.chain-slots {
+  display: flex;
+  justify-content: center;
+  gap: 7px;
+  min-height: 24px;
+}
+
+.chain-slots .slot {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 900;
+  color: rgba(255, 248, 231, 0.4);
+  border: 2px dashed rgba(255, 248, 231, 0.18);
+}
+
+.chain-slots .slot.filled {
+  border-style: solid;
+  border-color: var(--ink);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+  color: rgba(20, 20, 20, 0.85);
+}
+
+.chain-slots .slot.head {
+  outline: 2px solid var(--yellow);
+  outline-offset: 1.5px;
+}
+
+.chain-slots .slot.last {
+  animation: slotPop 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.5);
+}
+
+@keyframes slotPop {
+  0% { transform: scale(0.6); }
+  60% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+
+/* PALETTE DOCK + CHAIN ACTIONS */
 .palette-dock {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  background: rgba(255, 255, 255, 0.7);
-  border: var(--border);
-  box-shadow: var(--shadow-sm);
-  border-radius: 12px;
-  padding: 8px 10px;
+  align-items: stretch;
+  gap: 10px;
+  background: rgba(255, 248, 231, 0.04);
+  border: 1.5px solid rgba(255, 248, 231, 0.12);
+  border-radius: 14px;
+  padding: 10px;
 }
+
+.dock-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 86px;
+}
+
+.btn-mini {
+  flex: 1;
+  font-family: var(--font-main);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.4px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  border: 1.5px solid rgba(255, 248, 231, 0.16);
+  background: rgba(255, 248, 231, 0.06);
+  color: var(--cream);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.08s ease, background 0.08s ease, filter 0.08s ease;
+}
+
+.btn-mini:hover { background: rgba(255, 248, 231, 0.13); transform: translateY(-1px); }
+.btn-mini:active { transform: translateY(1px); }
+
+.btn-mini.danger:hover { background: rgba(255, 59, 48, 0.18); border-color: rgba(255, 59, 48, 0.5); }
 
 .swatches-grid {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
-  gap: 5px;
+  gap: 6px;
   flex: 1;
+  align-content: center;
 }
 
 .swatch {
-  height: 26px;
-  border: var(--border-sm);
-  box-shadow: 1.5px 1.5px 0 var(--ink);
-  border-radius: 6px;
+  height: 30px;
+  border: 2px solid rgba(0, 0, 0, 0.55);
+  border-radius: 8px;
   cursor: pointer;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.35),
+    inset 0 -3px 0 rgba(0, 0, 0, 0.28);
+  transition: transform 0.08s ease, filter 0.08s ease;
 }
 
 .swatch:hover {
   transform: translateY(-2px);
-  box-shadow: 3px 3px 0 var(--ink);
+  filter: brightness(1.1);
 }
 
 .swatch:active {
-  transform: translate(1px, 1px);
-  box-shadow: 0 0 0;
+  transform: translateY(1px) scale(0.97);
 }
 
-.btn-redo {
-  font-size: 10px;
-  font-weight: 900;
-  background: var(--yellow);
-  color: var(--ink);
-  border: var(--border-sm);
-  box-shadow: 2px 2px 0 var(--ink);
-  border-radius: 8px;
-  padding: 8px 10px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: transform 0.08s ease, box-shadow 0.08s ease;
-}
-
-.btn-redo:hover {
-  transform: translate(-1px, -1px);
-  box-shadow: 3px 3px 0 var(--ink);
-  background: #FFE066;
-}
-
-.btn-redo:active {
-  transform: translate(1px, 1px);
-  box-shadow: 0 0 0;
-}
-
-/* RIGHT PANEL: BRAND HERO & PLAY */
+/* RIGHT PANEL: NICKNAME & PLAY */
 .hero-brand {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  animation: heroFloat 4.5s ease-in-out 1.2s infinite alternate;
+}
+
+@keyframes heroFloat {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-4px); }
 }
 
 .logo-title {
-  font-size: 38px;
+  /* 8vw floor keeps the 10-letter wordmark inside 320 px viewports
+     (26 px × ~0.68 em/char ≈ 180 px + accent chip); 58 px cap on desktop. */
+  font-size: clamp(26px, 8vw, 58px);
   font-weight: 900;
   line-height: 1;
   letter-spacing: -1px;
-  color: var(--ink);
+  color: var(--cream);
+  text-shadow: 0 6px 30px rgba(0, 0, 0, 0.5);
+}
+
+/* Per-letter entrance: each <i> carries --d (index) for its stagger. */
+.logo-title i {
+  font-style: normal;
+  display: inline-block;
+  animation: letterIn 0.38s calc(var(--d) * 0.05s) both cubic-bezier(0.175, 0.885, 0.32, 1.35);
+}
+
+@keyframes letterIn {
+  0% { opacity: 0; transform: translateY(22px) scale(0.7) rotate(-6deg); }
+  100% { opacity: 1; transform: translateY(0) scale(1) rotate(0deg); }
 }
 
 .logo-accent {
-  background: var(--yellow);
+  background: linear-gradient(135deg, var(--yellow) 0%, #FFB300 100%);
   color: var(--ink);
-  padding: 2px 8px;
-  margin-left: 6px;
-  border: var(--border-sm);
-  box-shadow: 3px 3px 0 var(--ink);
+  padding: 2px 12px;
+  margin-left: 8px;
+  border-radius: 12px;
   display: inline-block;
-  transform: rotate(2deg);
+  transform: rotate(-1.5deg);
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 0 28px rgba(255, 217, 61, 0.35),
+    inset 0 2px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* Periodic shine sweeping across the CHAIN tag. */
+.logo-accent::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.65) 50%, transparent 58%);
+  transform: translateX(-130%);
+  animation: shineSweep 3.4s ease-in-out 1.4s infinite;
+}
+
+@keyframes shineSweep {
+  0%, 55% { transform: translateX(-130%); }
+  100% { transform: translateX(130%); }
 }
 
 .logo-tagline {
-  font-size: 11px;
+  font-size: clamp(9px, 1.1vw, 11px);
   font-weight: 800;
-  letter-spacing: 1px;
-  color: rgba(20, 20, 20, 0.65);
+  letter-spacing: 0.32em;
+  color: rgba(255, 248, 231, 0.5);
   text-transform: uppercase;
-  margin-top: 4px;
+  margin-top: 6px;
+  animation: deckChildIn 0.4s 0.4s both cubic-bezier(0.175, 0.885, 0.32, 1.2);
+}
+
+.logo-tagline::before,
+.logo-tagline::after {
+  content: "──";
+  color: rgba(255, 217, 61, 0.35);
+  margin: 0 8px;
+  letter-spacing: 0;
 }
 
 .play-action-wrap {
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 10px;
+  flex: 1;
 }
 
 .name-field-wrap {
@@ -383,42 +694,62 @@ html, body {
   font-size: 9.5px;
   font-weight: 900;
   letter-spacing: 0.6px;
-  color: var(--ink);
+  color: rgba(255, 248, 231, 0.55);
   text-transform: uppercase;
 }
 
 .input {
   width: 100%;
-  height: 44px;
-  background: var(--white);
-  border: var(--border);
-  box-shadow: var(--shadow-sm);
-  border-radius: 10px;
+  height: 46px;
+  background: rgba(7, 11, 24, 0.6);
+  border: 1.5px solid rgba(255, 248, 231, 0.18);
+  border-radius: 12px;
   padding: 0 14px;
   font-family: var(--font-main);
   font-size: 15px;
   font-weight: 800;
-  color: var(--ink);
+  color: var(--cream);
   outline: none;
-  transition: transform 0.1s ease, box-shadow 0.1s ease, border-color 0.1s ease;
+  transition: border-color 0.1s ease, box-shadow 0.1s ease, background 0.1s ease;
+}
+
+.input::placeholder {
+  color: rgba(255, 248, 231, 0.3);
+  font-weight: 700;
 }
 
 .input:focus {
-  transform: translate(-1px, -1px);
-  box-shadow: var(--shadow-md);
-  border-color: var(--ink);
+  background: rgba(7, 11, 24, 0.85);
+  border-color: #00C2D1;
+  box-shadow: 0 0 0 3px rgba(0, 194, 209, 0.22), 0 0 18px rgba(0, 194, 209, 0.15);
+}
+
+.input.flash-invalid {
+  animation: invalidFlash 0.45s ease;
+}
+
+@keyframes invalidFlash {
+  0%, 100% { box-shadow: none; }
+  30% { box-shadow: 0 0 0 3px rgba(255, 59, 48, 0.35); border-color: var(--red); transform: translateX(-2px); }
+}
+
+.name-error {
+  font-size: 9.5px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  color: #FF6B6B;
+  text-transform: uppercase;
 }
 
 .btn-play {
   width: 100%;
-  height: 52px;
-  background: linear-gradient(180deg, #A8FF53 0%, #86EF2E 100%);
-  color: var(--ink);
-  border: var(--border-thick);
-  box-shadow: var(--shadow-md);
-  border-radius: 12px;
+  height: 56px;
+  background: linear-gradient(180deg, #B9FF66 0%, #86EF2E 100%);
+  color: #0B1126;
+  border: none;
+  border-radius: 14px;
   font-family: var(--font-main);
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 900;
   letter-spacing: 0.8px;
   cursor: pointer;
@@ -426,18 +757,41 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    0 12px 30px rgba(134, 239, 46, 0.28),
+    inset 0 2px 0 rgba(255, 255, 255, 0.5);
   transition: transform 0.08s ease, box-shadow 0.08s ease, filter 0.08s ease;
+  /* Idle heartbeat — animates shadow/brightness only so the hover transform
+     keeps working. Runs on every .btn-play (PLAY / RESPAWN / RECONNECT). */
+  animation: playPulse 2.6s ease-in-out infinite;
+}
+
+@keyframes playPulse {
+  0%, 100% { box-shadow: 0 10px 24px rgba(134, 239, 46, 0.22), inset 0 2px 0 rgba(255, 255, 255, 0.5); filter: brightness(1); }
+  50% { box-shadow: 0 16px 40px rgba(134, 239, 46, 0.4), inset 0 2px 0 rgba(255, 255, 255, 0.5); filter: brightness(1.06); }
+}
+
+/* Shine sweep across the button face. */
+.btn-play::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 40%, rgba(255, 255, 255, 0.55) 50%, transparent 60%);
+  transform: translateX(-130%);
+  animation: shineSweep 3.4s ease-in-out 2s infinite;
+  pointer-events: none;
 }
 
 .btn-play:hover {
-  transform: translate(-2px, -2px);
-  box-shadow: var(--shadow-xl);
+  transform: translateY(-2px);
   filter: brightness(1.05);
 }
 
 .btn-play:active {
-  transform: translate(2px, 2px);
-  box-shadow: 1px 1px 0 var(--ink);
+  transform: translateY(2px) scale(0.99);
+  filter: brightness(0.98);
 }
 
 .btn-arrow {
@@ -464,51 +818,80 @@ html, body {
   text-align: center;
 }
 
+/* Overlay-panel typography on the dark surface. */
+.subtitle {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: -0.3px;
+  color: var(--cream);
+}
+
+.tagline {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.28em;
+  color: rgba(255, 248, 231, 0.5);
+  text-transform: uppercase;
+}
+
 /* RESPONSIVE: PORTRAIT / MOBILE FALLBACK */
 @media (max-width: 680px), (orientation: portrait) {
   .arcade-deck {
-    max-width: 400px;
-    padding: 16px 18px;
-    gap: 12px;
+    max-width: 430px;
+    padding: 14px 16px;
+    gap: 10px;
   }
   .deck-body {
     grid-template-columns: 1fr;
     gap: 12px;
   }
-  .logo-title {
-    font-size: 30px;
-  }
   .snake-stage {
-    height: 80px;
+    height: 88px;
   }
-  .btn-play {
-    height: 46px;
-    font-size: 16px;
+  /* Dock wraps so the action stack sits under the swatch grid on phones. */
+  .palette-dock {
+    flex-wrap: wrap;
+  }
+  .dock-actions {
+    flex-direction: row;
+    width: 100%;
+  }
+  .play-action-wrap {
+    gap: 8px;
   }
 }
 
-/* DESKTOP KEYBOARD CONTROLS (Neo-Brutalism Arcade Chips) */
-.desktop-hints {
+/* CONTROL HINTS (desktop + touch variants) */
+.desktop-hints,
+.mobile-hints {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 7px;
-  margin-top: 3px;
+  margin-top: 2px;
   font-family: var(--font-main);
+}
+
+/* Touch devices see DRAG/HOLD hints instead of keyboard chips. */
+.mobile-hints { display: none; }
+
+@media (hover: none) and (pointer: coarse) {
+  .mobile-hints { display: flex; }
+  .desktop-hints { display: none; }
 }
 
 .hint-pill {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: var(--cream-card);
-  border: 1.5px solid var(--ink);
-  box-shadow: 2px 2px 0 var(--ink);
-  border-radius: 6px;
-  padding: 2px 6px;
+  background: rgba(255, 248, 231, 0.05);
+  border: 1px solid rgba(255, 248, 231, 0.14);
+  border-radius: 999px;
+  padding: 3px 9px;
   font-size: 9.5px;
   font-weight: 900;
-  color: var(--ink);
+  color: rgba(255, 248, 231, 0.65);
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
@@ -516,14 +899,12 @@ html, body {
 .hint-pill kbd {
   background: var(--yellow);
   color: var(--ink);
-  border: 1.5px solid var(--ink);
-  box-shadow: 1px 1px 0 var(--ink);
-  border-radius: 4px;
-  padding: 1px 5px;
+  border-radius: 5px;
+  padding: 1.5px 6px;
   font-family: var(--font-main);
   font-size: 9px;
   font-weight: 900;
-  line-height: 1.1;
+  line-height: 1.2;
   display: inline-block;
 }
 
@@ -554,8 +935,10 @@ html, body {
 /* TOP LEFT: MINIMAP & LENGTH PILL */
 .hud-top-left {
   position: absolute;
-  top: 16px;
-  left: 16px;
+  /* Landscape on notched phones (viewport-fit=cover): keep clear of the
+     camera cutout / sensor area on every edge. */
+  top: calc(16px + env(safe-area-inset-top, 0px));
+  left: calc(16px + env(safe-area-inset-left, 0px));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -585,10 +968,35 @@ html, body {
   letter-spacing: 0.5px;
 }
 
+.hud-stat-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.ping-badge {
+  background: rgba(255, 253, 247, 0.9);
+  border: 1.5px solid var(--ink);
+  box-shadow: 2px 2px 0 var(--ink);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 8.5px;
+  font-weight: 900;
+  color: var(--ink);
+  letter-spacing: 0.4px;
+  min-height: 14px;
+}
+
+.ping-badge.bad {
+  background: var(--red);
+  color: var(--white);
+}
+
 /* TOP CENTER: KILLFEED (User Kills Only) */
 .killfeed {
   position: absolute;
-  top: 16px;
+  top: calc(16px + env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -625,8 +1033,8 @@ html, body {
 /* TOP RIGHT: LEADERBOARD (Top 3 Only - Micro 50% Size) */
 .board {
   position: absolute;
-  top: 12px;
-  right: 12px;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
   width: 92px;
   background: rgba(255, 253, 247, 0.95);
   border: 1.5px solid var(--ink);
@@ -641,7 +1049,7 @@ html, body {
 }
 
 .board-title {
-  font-size: 7.5px;
+  font-size: 8.5px;
   font-weight: 900;
   letter-spacing: 0.5px;
   color: var(--ink);
@@ -654,7 +1062,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 3px;
-  font-size: 7.5px;
+  font-size: 8.5px;
   font-weight: 800;
   padding: 1px 1.5px;
 }
@@ -681,19 +1089,20 @@ html, body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 46px;
+  max-width: 52px;
 }
 
 .board-row .ln {
-  font-size: 7.5px;
+  font-size: 8.5px;
   font-weight: 900;
 }
 
 /* BOTTOM RIGHT: FLOATING BOOST BUTTON (Always Visible on Mobile & DevTools) */
 .boost-btn {
   position: absolute;
-  bottom: 20px;
-  right: 20px;
+  /* Clear of the home-indicator swipe bar and the landscape notch. */
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  right: calc(20px + env(safe-area-inset-right, 0px));
   width: 74px;
   height: 74px;
   border-radius: 50%;
@@ -726,6 +1135,135 @@ html, body {
   background: var(--red);
   transform: scale(0.95);
   box-shadow: 2px 2px 0 var(--ink);
+}
+
+/* MODE PICKER — sits right above the PLAY button */
+.mode-row {
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.mode-row .pat-pill {
+  font-size: 10.5px;
+  padding: 6px 12px;
+}
+
+/* PATTERN PICKER ROW (chain forge, under the palette dock) */
+.pattern-row {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.pat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  border: 1.5px solid rgba(255, 248, 231, 0.16);
+  background: rgba(255, 248, 231, 0.05);
+  color: var(--cream);
+  font-family: var(--font-main);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+  transition: background 0.08s ease, border-color 0.08s ease, transform 0.08s ease;
+}
+
+.pat-pill:hover {
+  background: rgba(255, 248, 231, 0.12);
+  transform: translateY(-1px);
+}
+
+.pat-pill.active {
+  background: rgba(255, 217, 61, 0.16);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.pat-preview {
+  width: 40px;
+  height: 20px;
+  display: block;
+  image-rendering: pixelated;
+}
+
+/* LIFETIME PROGRESSION STRIP (menu) — hidden until first finished game */
+.menu-stats {
+  min-height: 14px;
+  font-size: 9.5px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  color: rgba(255, 248, 231, 0.75);
+  text-align: center;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-stats:empty {
+  min-height: 0;
+  margin: 0;
+}
+
+/* PERSONAL BEST CELEBRATION BANNER (death screen) */
+.pb-banner {
+  align-self: center;
+  background: linear-gradient(180deg, #B9FF66 0%, #86EF2E 100%);
+  color: #0B1126;
+  border: 2px solid var(--ink);
+  box-shadow: 3px 3px 0 var(--ink);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  animation: pbPop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.4);
+}
+
+.pb-banner.hidden {
+  display: none !important;
+}
+
+@keyframes pbPop {
+  0% { transform: scale(0.7) rotate(-2deg); opacity: 0; }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+/* BR COLLAPSE CHAMPION BANNER (in-game, top-center under the killfeed) */
+.champ-banner {
+  position: absolute;
+  top: calc(64px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, #B9FF66 0%, #86EF2E 100%);
+  color: #0B1126;
+  border: 2px solid var(--ink);
+  box-shadow: var(--shadow-md);
+  border-radius: 10px;
+  padding: 7px 18px;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  z-index: 30;
+  pointer-events: none; /* display-only: must never block gameplay clicks */
+  animation: popIn 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.champ-banner.hidden {
+  display: none !important;
+}
+
+/* SPECTATE-ON-DEATH: lighten the death overlay so killer-cam stays watchable */
+#death.spectating {
+  background: rgba(4, 7, 16, 0.45);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* MOBILE VIRTUAL JOYSTICK */
@@ -763,16 +1301,15 @@ html, body {
 .death-title {
   font-size: 28px;
   font-weight: 900;
-  color: var(--red);
+  color: #FF6B6B;
   letter-spacing: -0.5px;
 }
 
 .death-killer {
   width: 100%;
-  background: var(--yellow);
-  color: var(--ink);
-  border: var(--border);
-  box-shadow: var(--shadow-sm);
+  background: rgba(255, 217, 61, 0.1);
+  color: var(--yellow);
+  border: 1px solid rgba(255, 217, 61, 0.35);
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 12px;
@@ -782,7 +1319,7 @@ html, body {
 }
 
 .death-killer b {
-  color: var(--red);
+  color: #FF8A8A;
 }
 
 .death-stats {
@@ -793,10 +1330,9 @@ html, body {
 }
 
 .stat-card {
-  background: var(--white);
-  border: var(--border);
-  box-shadow: var(--shadow-sm);
-  border-radius: 8px;
+  background: rgba(255, 248, 231, 0.05);
+  border: 1.5px solid rgba(255, 248, 231, 0.14);
+  border-radius: 10px;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -806,13 +1342,13 @@ html, body {
 .stat-card span {
   font-size: 9.5px;
   font-weight: 900;
-  color: rgba(20, 20, 20, 0.6);
+  color: rgba(255, 248, 231, 0.5);
 }
 
 .stat-card b {
   font-size: 17px;
   font-weight: 900;
-  color: var(--ink);
+  color: var(--cream);
 }
 
 /* SPINNER */
@@ -836,41 +1372,26 @@ html, body {
 
 /* MOBILE PHONE BROWSERS & ANDROID APPS */
 @media (max-width: 600px) {
-  .menu-card {
-    max-width: 350px;
-    padding: 14px 16px;
-    gap: 8px;
-    border-radius: 14px;
-  }
+  /* Hint visibility is handled by the (hover:none)/(pointer:coarse) rules —
+     a narrow desktop window keeps its MOUSE/SPACE chips. */
 
-  .title {
-    font-size: 25px;
-  }
-
-  .desktop-hints {
-    display: none;
-  }
-
-  .preview-box {
-    height: 52px;
-  }
-
-  .color-picker-card {
-    padding: 7px 9px;
-    gap: 5px;
-  }
-
+  /* Touch targets: keep taps comfortably above the ~40px minimum. */
   .swatch {
-    height: 22px;
+    height: 34px;
+  }
+
+  .btn-mini {
+    font-size: 10.5px;
+    padding: 8px 10px;
   }
 
   .input {
-    height: 38px;
+    height: 40px;
     font-size: 13.5px;
   }
 
   .btn-play {
-    height: 42px;
+    height: 44px;
     font-size: 15px;
   }
 
@@ -880,7 +1401,7 @@ html, body {
   }
 
   .board {
-    width: 82px;
+    width: 88px;
     padding: 2.5px 4px;
   }
 
@@ -897,5 +1418,60 @@ html, body {
 @media (min-width: 1024px) and (hover: hover) and (pointer: fine) {
   .joystick {
     display: none !important;
+  }
+
+  /* Desktop steers with the mouse and boosts with Space/LMB — the on-screen
+     button is a touch control and only adds clutter here. */
+  .boost-btn {
+    display: none !important;
+  }
+
+  /* Belt & braces: touch hints never show on fine-pointer devices. */
+  .mobile-hints {
+    display: none !important;
+  }
+}
+
+/* Kill double-tap-to-zoom on controls (iOS Safari ignores per-canvas
+   touch-action once a tap lands on a button). */
+button,
+.swatch,
+.input {
+  touch-action: manipulation;
+}
+
+/* ==========================================================================
+   COMPACT LANDSCAPE (phone gaming orientation, e.g. 568×375 / 667×375):
+   stay TWO-column so the whole deck fits without internal scrolling.
+   Placed after every other menu rule so it wins the cascade where both
+   media queries apply (width ≤ 680 would otherwise force single-column).
+   ========================================================================== */
+@media (orientation: landscape) and (max-height: 520px) {
+  .arcade-deck {
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .deck-body {
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 12px;
+  }
+  .hero-brand {
+    gap: 0;
+  }
+  .logo-tagline {
+    display: none; /* identity lives in the wordmark; height is scarce */
+  }
+  .snake-stage {
+    height: 84px;
+  }
+  .chain-slots {
+    min-height: 20px;
+  }
+  .desktop-hints,
+  .mobile-hints {
+    display: none; /* muscle-memory controls; space beats hints here */
+  }
+  .play-action-wrap {
+    gap: 6px;
   }
 }

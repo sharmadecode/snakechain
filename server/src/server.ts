@@ -8,6 +8,7 @@ import { Session, ClientHandle } from "./session.js";
 import { Player } from "./player.js";
 import * as C from "./config.js";
 import { normAngle } from "./vec.js";
+import { CHAIN_PACKED_MAX, CHAIN_MAX_COLORS, isCanonicalChain, packChain } from "./colors.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,6 +54,38 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
+// Hosted platforms (Render etc.) sit behind a reverse proxy: without
+// TRUST_PROXY=1 every client shares the proxy's remoteAddress and
+// MAX_PER_IP locks everyone out after a few connections.
+if (!TRUST_PROXY && (process.env.RENDER || process.env.WEBSITE_SITE_NAME)) {
+  console.warn(
+    `[server] WARNING: reverse-proxy hosting detected but TRUST_PROXY is not 1 — ` +
+      `every client shares the proxy IP and MAX_PER_IP=${MAX_PER_IP} will lock everyone out.`,
+  );
+}
+
+const BOOT_AT = Date.now();
+
+/**
+ * Resolve the client IP for per-IP limiting.
+ *
+ * TRUST_PROXY=1 (REQUIRED behind Render/any reverse proxy — without it
+ * every client shares the proxy's remoteAddress and MAX_PER_IP locks
+ * everyone out): trust exactly ONE hop. The rightmost X-Forwarded-For
+ * entry is the one our trusted edge appended; leftmost entries are
+ * client-controlled and trivially spoofable.
+ */
+function clientIp(req: http.IncomingMessage): string {
+  if (TRUST_PROXY) {
+    const xff = req.headers["x-forwarded-for"];
+    if (typeof xff === "string" && xff) {
+      const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts[parts.length - 1]!;
+    }
+  }
+  return (req.socket.remoteAddress ?? "unknown").replace(/^::ffff:/, "");
+}
+
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -91,8 +124,8 @@ let connCount = 0;
 
 const SECURITY_HEADERS: Record<string, string> = {
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-    "connect-src 'self' ws: wss:; img-src 'self'; font-src 'self'; object-src 'none'; " +
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+    "connect-src 'self' ws: wss:; img-src 'self'; font-src 'self' https://fonts.gstatic.com; object-src 'none'; " +
     "base-uri 'self'; frame-ancestors 'none'; form-action 'none'",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
@@ -105,8 +138,19 @@ if (HTTPS) {
 
 function httpHandler(req: http.IncomingMessage, res: http.ServerResponse): void {
   if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json", ...SECURITY_HEADERS });
-    res.end(JSON.stringify({ ok: true }));
+    // Truthful health: the tick loop must be alive (sinceLastTickMs small)
+    // and not permanently erroring. A static {ok:true} here would stay
+    // green through a wedged simulation.
+    const st = matchmaker.healthStats();
+    const ok =
+      st.sinceLastTickMs >= 0 && st.sinceLastTickMs < 2000 && st.tickErrStreak < 150;
+    res.writeHead(ok ? 200 : 503, { "content-type": "application/json", ...SECURITY_HEADERS });
+    res.end(JSON.stringify({
+      ok,
+      uptimeS: Math.round((Date.now() - BOOT_AT) / 1000),
+      conns: connCount,
+      ...st,
+    }));
     return;
   }
   if (req.url === "/ping") {
@@ -126,10 +170,10 @@ function httpHandler(req: http.IncomingMessage, res: http.ServerResponse): void 
   }
 
   fs.readFile(abs, (err, data) => {
-    if (err || !fs.existsSync(abs)) {
+    if (err) {
       if (url === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS });
-        res.end("<!doctype html><meta charset=utf-8><h1>BLOCKS</h1><p>Client build not found.</p>");
+        res.end("<!doctype html><meta charset=utf-8><h1>SnakeChain</h1><p>Client build not found.</p>");
         return;
       }
       res.writeHead(404, SECURITY_HEADERS);
@@ -138,7 +182,14 @@ function httpHandler(req: http.IncomingMessage, res: http.ServerResponse): void 
     }
     res.writeHead(200, {
       "content-type": MIME[path.extname(abs).toLowerCase()] ?? "application/octet-stream",
-      "cache-control": url === "/" ? "no-cache" : "public, max-age=3600",
+      "cache-control":
+        url === "/"
+          ? "no-cache"
+          : rel.startsWith("assets/")
+            // Vite content-hashes these filenames — they never change, so
+            // cache them for a year (SW already does the same).
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=3600",
       ...SECURITY_HEADERS,
     });
     res.end(data);
@@ -146,7 +197,6 @@ function httpHandler(req: http.IncomingMessage, res: http.ServerResponse): void 
 }
 
 const server = http.createServer(httpHandler);
-server.maxRequestsPerSocket = 500;
 const wss = new WebSocketServer({
   server,
   path: "/ws",
@@ -177,14 +227,6 @@ const wss = new WebSocketServer({
 });
 wss.on("error", (err) => console.error("[ws] server error:", err.message));
 
-function clientIp(req: http.IncomingMessage): string {
-  if (TRUST_PROXY) {
-    const xff = req.headers["x-forwarded-for"];
-    if (typeof xff === "string" && xff) return xff.split(",")[0]!.trim();
-  }
-  return (req.socket.remoteAddress ?? "unknown").replace(/^::ffff:/, "");
-}
-
 function send(c: Conn, obj: unknown): void {
   if (c.ws.readyState !== WebSocket.OPEN) return;
   if (c.ws.bufferedAmount > C.WS_MAX_BUFFERED) {
@@ -204,7 +246,6 @@ function dropConn(c: Conn, reason: string): void {
   const n = connsByIp.get(c.ip);
   if (n && n <= 1) connsByIp.delete(c.ip);
   else if (n) connsByIp.set(c.ip, n - 1);
-  console.log(`[net] closed: ${reason}`);
 }
 
 function leaveSession(c: Conn): void {
@@ -215,6 +256,14 @@ function leaveSession(c: Conn): void {
   }
   c.player = null;
   c.session = null;
+}
+
+/** Clamp a client-reported viewport radius once, at the trust boundary.
+    Must be a finite number — a truthy non-number here (NaN) poisons every
+    later comparison and blanks the client's world. */
+function clampViewR(v: unknown): number {
+  const n = typeof v === "number" && Number.isFinite(v) ? v : 0;
+  return Math.round(Math.max(C.VIEW_FLOOR, Math.min(n, C.VIEW_MAX)));
 }
 
 function validateJoin(raw: unknown): { name: string; color: number; pattern: number } | null {
@@ -228,26 +277,32 @@ function validateJoin(raw: unknown): { name: string; color: number; pattern: num
 
   let color = 0;
   if (Array.isArray(m.c)) {
-    let packed = 0;
-    const len = Math.max(1, m.c.length);
-    for (let i = 0; i < 5; i++) {
-      const val = Number(m.c[i % len]) || 0;
-      const ci = ((Math.floor(val) % C.NUM_COLORS) + C.NUM_COLORS) % C.NUM_COLORS;
-      packed += ci * (16 ** i);
-    }
-    color = packed;
-  } else if (typeof m.c === "number" && Number.isFinite(m.c) && m.c >= 0 && m.c <= Number.MAX_SAFE_INTEGER) {
-    color = Math.floor(m.c);
+    // Canonical chain from explicit palette indices (count nibble first).
+    const list = m.c.slice(0, CHAIN_MAX_COLORS).map((v) => Number(v) || 0);
+    color = packChain(list);
+  } else if (typeof m.c === "number" && Number.isFinite(m.c)) {
+    const n = m.c;
+    // Canonical wire format: low nibble = chain count (1..8) followed by
+    // that many color nibbles. The legal maximum is < 2^37 << 2^53, so a
+    // safe-integer bound rejects hostile magnitudes WITHOUT clipping legal
+    // 5–8 color chains — the old `%2^20` truncation corrupted exactly
+    // those (fifth block silently became palette index 0).
+    if (!Number.isSafeInteger(n) || n < 0 || n > CHAIN_PACKED_MAX) return null;
+    color = isCanonicalChain(n) ? n : 0; // unknown shape → neutral default
   } else {
     return null;
   }
 
-  const pattern = typeof m.p === "number" && Number.isInteger(m.p) ? m.p : 0;
+  const pattern =
+    typeof m.p === "number" && Number.isInteger(m.p)
+      ? ((m.p % C.NUM_PATTERNS) + C.NUM_PATTERNS) % C.NUM_PATTERNS
+      : 0;
   return { name, color, pattern };
 }
 
 function handleMessage(c: Conn, text: string): void {
-  const now = Date.now();
+  // Monotonic clock for the flood window (see join branch note).
+  const now = performance.now();
   if (now - c.msgWindowStart > 10_000) {
     c.msgWindowStart = now;
     c.msgCount = 0;
@@ -267,25 +322,42 @@ function handleMessage(c: Conn, text: string): void {
   const m = msg as Record<string, unknown>;
 
   if (m.t === "join") {
-    const now = Date.now();
+    // Monotonic clock for rate windows: a system-clock jump (NTP) must not
+    // hold windows open or expire them all at once.
+    const now = performance.now();
     if (now - c.joinWindowStart > 10_000) {
       c.joinWindowStart = now;
       c.joinedCount = 0;
     }
     if (++c.joinedCount > 10) return;
     const v = validateJoin(m);
-    if (!v) return;
+    if (!v) {
+      // A silent ignore strands the client on "ENTERING ARENA…" forever —
+      // always tell it why the join did not happen.
+      send(c, { t: "joinErr", why: "name" });
+      return;
+    }
+    // Mode routing: “br” joins the collapse arena, everything else classic.
+    const mo = m.mo === "br" ? "br" : "classic";
+    const session = matchmaker.getArena(mo);
+    // ACTOR_CAP covers humans + bots; keep BOT_MAX slots reserved for
+    // filler bots and refuse beyond that instead of melting the fixed-step
+    // loop with an uncapped arena.
+    if (session.humans.size >= C.ACTOR_CAP - C.BOT_MAX) {
+      send(c, { t: "joinErr", why: "full" });
+      c.ws.close(1013, "arena full");
+      return;
+    }
     if (c.player && c.session) leaveSession(c);
-    const session = matchmaker.getArena();
     const player = new Player(v.name, v.color, v.pattern, false);
     c.player = player;
     c.session = session;
-    // Client-reported viewport radius, clamped to a safe range. A modified
-    // client must never be able to request the whole world.
-    const vr = Math.round(Math.max(C.VIEW_HALF, Math.min(m.v as number || 0, C.VIEW_MAX)));
+    const vr = clampViewR(m.v);
     c.handle = {
       viewR: vr,
       bodyKnown: new Set<number>(),
+      foodKnown: new Set<number>(),
+      spectatePid: 0,
       send: (data: string) => {
         if (c.ws.readyState === WebSocket.OPEN && c.ws.bufferedAmount < C.WS_MAX_BUFFERED) {
           c.ws.send(data);
@@ -294,8 +366,20 @@ function handleMessage(c: Conn, text: string): void {
     } satisfies ClientHandle;
     session.addHuman(player, c.handle, true);
     matchmaker.onHumanJoined(session);
-    send(c, { t: "hi", id: player.id, w: [session.halfW, session.halfH], tick: 1000 / C.TICK_RATE, v: CLIENT_BUILD });
-    c.ws.send(session.foodSnapshot(player, vr));
+    send(c, {
+      t: "hi",
+      id: player.id,
+      w: [session.halfW, session.halfH],
+      tick: 1000 / C.TICK_RATE,
+      v: CLIENT_BUILD,
+      // Prediction constants so client steering math can never drift from
+      // server authority when these are tuned.
+      turn: [C.MAX_TURN_SPEED, C.MIN_TURN_SPEED, C.TURN_SPEED_FALLOFF],
+    });
+    // Route through the guarded handle send (bufferedAmount back-pressure)
+    // instead of a raw ws.send — the snapshot can exceed 100KB on desktop
+    // view radii.
+    c.handle.send(session.foodSnapshot(player, vr + C.INTEREST_SAFETY, c.handle.foodKnown));
     console.log(`[net] ${player.name} joined ${session.id} (${session.humans.size} humans, ${session.botCount()} bots)`);
     return;
   }
@@ -304,13 +388,22 @@ function handleMessage(c: Conn, text: string): void {
     if (!c.handle) return;
     const rv = m.r;
     if (typeof rv !== "number" || !Number.isFinite(rv) || rv <= 0) return;
-    c.handle.viewR = Math.round(Math.max(C.VIEW_HALF, Math.min(rv, C.VIEW_MAX)));
+    c.handle.viewR = clampViewR(rv);
+    // Optional spectate target: while this client is dead, interest filtering
+    // centers on that LIVE player instead of the corpse. Validated strictly.
+    if (m.tg !== undefined) {
+      const tg = m.tg;
+      c.handle.spectatePid =
+        typeof tg === "number" && Number.isInteger(tg) && tg > 0 && tg < 2 ** 31
+          ? tg
+          : 0;
+    }
     return;
   }
 
   if (m.t === "input") {
     if (!c.player || !c.player.alive || !c.session) return;
-    const now = Date.now();
+    const now = performance.now();
     if (now - c.lastInputAt > 1000) {
       c.lastInputAt = now;
       c.inputCount = 0;
@@ -320,7 +413,11 @@ function handleMessage(c: Conn, text: string): void {
     const b = m.b;
     if (typeof a !== "number" || !Number.isFinite(a)) return;
     if (typeof b !== "boolean") return;
-    c.player.angle = normAngle(a);
+    // Store the desired heading, not the heading itself: move() clamps the
+    // turn toward it at maxTurnRate. Accepting the raw angle would let a
+    // modified client instant-flip 180° (self-collision is off, so that is
+    // a free escape from any head-on).
+    c.player.targetAngle = normAngle(a);
     c.player.boosting = b;
     return;
   }
@@ -338,6 +435,13 @@ function handleMessage(c: Conn, text: string): void {
 
 wss.on("connection", (ws, req) => {
   const ip = clientIp(req);
+  // Reject before any counter is incremented: a rejected socket never gets a
+  // Conn, so nothing will ever decrement on its behalf — incrementing first
+  // would leak the per-IP counter and lock that IP out permanently.
+  if (connCount >= MAX_CONNS) {
+    ws.close(1013, "server full");
+    return;
+  }
   if (ip !== "127.0.0.1" && ip !== "::1" && ip !== "localhost") {
     const current = connsByIp.get(ip) ?? 0;
     if (current >= MAX_PER_IP) {
@@ -345,10 +449,6 @@ wss.on("connection", (ws, req) => {
       return;
     }
     connsByIp.set(ip, current + 1);
-  }
-  if (connCount >= MAX_CONNS) {
-    ws.close(1013, "server full");
-    return;
   }
   connCount++;
 
@@ -370,7 +470,12 @@ wss.on("connection", (ws, req) => {
   connsByWs.set(ws, c);
 
   ws.on("message", (data) => {
-    handleMessage(c, data.toString());
+    try {
+      handleMessage(c, data.toString());
+    } catch (err) {
+      // One malformed/hostile frame must never take the process down.
+      console.error("[net] message handler error", err);
+    }
   });
 
   ws.on("pong", () => {
@@ -378,8 +483,9 @@ wss.on("connection", (ws, req) => {
   });
 
   ws.on("close", () => {
-    connsByWs.delete(ws);
-    connCount--;
+    // dropConn owns all connection accounting (connCount, connsByIp,
+    // connsByWs). Decrementing here too would double-count every
+    // disconnect and permanently disable the MAX_CONNS cap.
     dropConn(c, "client disconnected");
   });
 
@@ -423,5 +529,11 @@ function shutdown(): void {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 }
+// Last-resort process guards: the tick loop and message handler isolate
+// their own failures, but a stray throw outside those paths must LOG instead
+// of silently killing the process (Render restarts are a cold start players
+// wait through).
+process.on("uncaughtException", (err) => console.error("[fatal] uncaughtException:", err));
+process.on("unhandledRejection", (err) => console.error("[fatal] unhandledRejection:", err));
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

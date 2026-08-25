@@ -87,13 +87,13 @@ class GameState {
         val now = System.currentTimeMillis()
 
         for (i in 0 until rows.length()) {
-            val r = rows.getJSONArray(i)
-            val id = r.getInt(0)
-            val tx = r.getDouble(1).toFloat()
-            val ty = r.getDouble(2).toFloat()
-            val ta = r.getDouble(3).toFloat()
-            val tlen = r.getDouble(4).toFloat()
-            val thick = r.getDouble(5).toFloat()
+            val r = rows.optJSONArray(i) ?: continue
+            val id = r.optInt(0)
+            val tx = r.optDouble(1).toFloat()
+            val ty = r.optDouble(2).toFloat()
+            val ta = r.optDouble(3).toFloat()
+            val tlen = r.optDouble(4).toFloat()
+            val thick = r.optDouble(5).toFloat()
             val existing = players[id]
 
             if (existing != null) {
@@ -110,13 +110,13 @@ class GameState {
                 existing.ta = ta
                 existing.tlen = tlen
                 existing.thick = thick
-                existing.kills = r.getInt(10)
-                existing.name = r.getString(11)
+                existing.kills = r.optInt(10)
+                existing.name = r.optString(11, "snake")
                 existing.lastRowT = now
             } else {
                 players[id] = makePlayer(r, now)
             }
-            if (id == myId) myKills = r.getInt(10)
+            if (id == myId) myKills = r.optInt(10)
         }
 
         // NOTE: absence is NOT death (server interest-filters per client).
@@ -125,20 +125,20 @@ class GameState {
     }
 
     private fun makePlayer(r: JSONArray, now: Long): PlayerState {
-        val id = r.getInt(0)
-        val tx = r.getDouble(1).toFloat()
-        val ty = r.getDouble(2).toFloat()
-        val ta = r.getDouble(3).toFloat()
-        val tlen = r.getDouble(4).toFloat()
-        val thick = r.getDouble(5).toFloat()
+        val id = r.optInt(0)
+        val tx = r.optDouble(1).toFloat()
+        val ty = r.optDouble(2).toFloat()
+        val ta = r.optDouble(3).toFloat()
+        val tlen = r.optDouble(4).toFloat()
+        val thick = r.optDouble(5).toFloat()
         val p = PlayerState(
             id = id,
-            name = r.getString(11),
-            colorIdx = r.getInt(6),
-            patternIdx = r.getInt(7),
-            isBot = r.getInt(8) == 1,
-            kills = r.getInt(10),
-            boost = r.getInt(9) == 1,
+            name = r.optString(11, "snake"),
+            colorIdx = r.optInt(6),
+            patternIdx = r.optInt(7),
+            isBot = r.optInt(8) == 1,
+            kills = r.optInt(10),
+            boost = r.optInt(9) == 1,
             tx = tx, ty = ty, ta = ta, tlen = tlen, thick = thick,
             x = tx, y = ty, a = ta, len = tlen,
             lastRowT = now,
@@ -158,14 +158,14 @@ class GameState {
     fun applyBody(json: JSONObject) {
         val rows = json.optJSONArray("p") ?: return
         for (i in 0 until rows.length()) {
-            val r = rows.getJSONArray(i)
-            val id = r.getInt(0)
+            val r = rows.optJSONArray(i) ?: continue
+            val id = r.optInt(0)
             val pl = players[id] ?: continue
             val count = r.length() - 1
             if (count >= 4 && count % 2 == 0) {
                 val coords = FloatArray(count)
                 for (j in 0 until count) {
-                    coords[j] = r.getDouble(j + 1).toFloat()
+                    coords[j] = r.optDouble(j + 1).toFloat()
                 }
                 pl.body = coords
             }
@@ -175,11 +175,11 @@ class GameState {
     fun applyDeaths(json: JSONObject) {
         val rows = json.optJSONArray("d") ?: return
         for (i in 0 until rows.length()) {
-            val r = rows.getJSONArray(i)
-            val id = r.getInt(0)
+            val r = rows.optJSONArray(i) ?: continue
+            val id = r.optInt(0)
             val pl = players[id]
             if (pl != null) {
-                deathFx.add(floatArrayOf(r.getDouble(1).toFloat(), r.getDouble(2).toFloat(), pl.colorIdx.toFloat(), pl.thick))
+                deathFx.add(floatArrayOf(r.optDouble(1).toFloat(), r.optDouble(2).toFloat(), pl.colorIdx.toFloat(), pl.thick))
                 players.remove(id)
             }
         }
@@ -188,10 +188,12 @@ class GameState {
     fun applyFullFood(json: JSONArray) {
         food.clear()
         for (i in 0 until json.length()) {
-            val r = json.getJSONArray(i)
-            food[r.getInt(0)] = floatArrayOf(
-                r.getDouble(1).toFloat(), r.getDouble(2).toFloat(),
-                r.getInt(3).toFloat(),
+            val r = json.optJSONArray(i) ?: continue
+            // Row: [id, x, y, colorIdx, isDrop] — keep isDrop so death-drop
+            // glow pellets render (dropping it made the halo dead code).
+            food[r.optInt(0)] = floatArrayOf(
+                r.optDouble(1).toFloat(), r.optDouble(2).toFloat(),
+                r.optInt(3).toFloat(), if (r.optInt(4) == 1) 1f else 0f,
             )
         }
     }
@@ -201,10 +203,10 @@ class GameState {
         if (keep != null) {
             val next = HashMap<Int, FloatArray>()
             for (i in 0 until keep.length()) {
-                val r = keep.getJSONArray(i)
-                next[r.getInt(0)] = floatArrayOf(
-                    r.getDouble(1).toFloat(), r.getDouble(2).toFloat(),
-                    r.getInt(3).toFloat(),
+                val r = keep.optJSONArray(i) ?: continue
+                next[r.optInt(0)] = floatArrayOf(
+                    r.optDouble(1).toFloat(), r.optDouble(2).toFloat(),
+                    r.optInt(3).toFloat(), if (r.optInt(4) == 1) 1f else 0f,
                 )
             }
             food.clear()
@@ -214,17 +216,17 @@ class GameState {
         val spawned = json.optJSONArray("s")
         if (spawned != null) {
             for (i in 0 until spawned.length()) {
-                val r = spawned.getJSONArray(i)
-                food[r.getInt(0)] = floatArrayOf(
-                    r.getDouble(1).toFloat(), r.getDouble(2).toFloat(),
-                    r.getInt(3).toFloat(),
+                val r = spawned.optJSONArray(i) ?: continue
+                food[r.optInt(0)] = floatArrayOf(
+                    r.optDouble(1).toFloat(), r.optDouble(2).toFloat(),
+                    r.optInt(3).toFloat(), if (r.optInt(4) == 1) 1f else 0f,
                 )
             }
         }
         val removed = json.optJSONArray("r")
         if (removed != null) {
             for (i in 0 until removed.length()) {
-                val id = removed.getInt(i)
+                val id = removed.optInt(i)
                 val f = food.remove(id)
                 if (f != null && eatenFx.size < 40) {
                     eatenFx.add(f)
