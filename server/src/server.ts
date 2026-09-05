@@ -30,14 +30,27 @@ function findWebDist(): string {
 }
 const WEB_DIST = findWebDist();
 
-const CLIENT_BUILD = ((): string => {
+const CLIENT_INDEX = path.join(WEB_DIST, "index.html");
+// The web bundle hash changes on every client rebuild. Resolving it ONCE at
+// boot meant the running server echoed a stale id after any rebuild — every
+// fresh client then saw a permanent "new version available" banner that no
+// hard refresh could clear (the server, not the browser, was stale).
+// Fix: re-read only when index.html's mtime moves (one stat per join).
+let CLIENT_BUILD = "";
+let CLIENT_BUILD_MTIME = 0;
+function clientBuild(): string {
   try {
-    const html = fs.readFileSync(path.join(WEB_DIST, "index.html"), "utf8");
-    return /assets\/index-[A-Za-z0-9_-]+\.js/.exec(html)?.[0] ?? "";
+    const mt = fs.statSync(CLIENT_INDEX).mtimeMs;
+    if (mt !== CLIENT_BUILD_MTIME) {
+      const html = fs.readFileSync(CLIENT_INDEX, "utf8");
+      CLIENT_BUILD = /assets\/index-[A-Za-z0-9_-]+\.js/.exec(html)?.[0] ?? "";
+      CLIENT_BUILD_MTIME = mt;
+    }
   } catch {
-    return "";
+    /* keep last known id — a missing file must never break joins */
   }
-})();
+  return CLIENT_BUILD;
+}
 
 const envInt = (v: string | undefined, dflt: number): number => {
   const n = Number(v);
@@ -371,7 +384,7 @@ function handleMessage(c: Conn, text: string): void {
       id: player.id,
       w: [session.halfW, session.halfH],
       tick: 1000 / C.TICK_RATE,
-      v: CLIENT_BUILD,
+      v: clientBuild(),
       // Prediction constants so client steering math can never drift from
       // server authority when these are tuned.
       turn: [C.MAX_TURN_SPEED, C.MIN_TURN_SPEED, C.TURN_SPEED_FALLOFF],

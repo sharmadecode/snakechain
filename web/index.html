@@ -31,92 +31,102 @@
   <div id="app">
     <canvas id="game"></canvas>
 
-    <!-- MENU OVERLAY -->
-    <div id="menu" class="overlay">
-      <div class="menu-backdrop"></div>
+    <!-- MENU OVERLAY : CHAIN FORGE LANDING -->
+    <div id="menu" class="overlay menu-overlay">
+      <div class="menu-backdrop" aria-hidden="true"></div>
+      <div class="menu-vignette" aria-hidden="true"></div>
 
-      <div class="arcade-deck">
-        <!-- TOP DECK STATUS BAR -->
-        <header class="deck-topbar">
-          <div class="brand-left">
-            <span id="livePill" class="live-pill"><span class="live-dot"></span>LIVE</span>
-            <span id="onlineCount" class="online-pill" title="Players in the arena right now">— IN ARENA</span>
-          </div>
-          <div class="brand-right">
-            <button id="soundToggle" class="btn-icon" type="button" aria-label="Toggle sound" title="Sound">🔊 SFX</button>
-          </div>
-        </header>
+      <div class="arcade-deck forge-shell">
+        <button id="soundToggle" class="sound-fab" type="button" aria-label="Toggle sound" title="Sound">🔊</button>
 
-        <!-- HERO: THE CHAIN ITSELF -->
-        <div class="hero-brand">
-          <h1 class="logo-title" aria-label="SnakeChain">
-            <span class="logo-word" aria-hidden="true"><i style="--d:0">S</i><i style="--d:1">N</i><i style="--d:2">A</i><i style="--d:3">K</i><i style="--d:4">E</i></span><span class="logo-accent" aria-hidden="true"><i style="--d:5">C</i><i style="--d:6">H</i><i style="--d:7">A</i><i style="--d:8">I</i><i style="--d:9">N</i></span>
-          </h1>
-          <p class="logo-tagline">GROW YOUR CHAIN · CUT OFF THE REST</p>
+        <!-- ================= VIEW 1: CLEAN HOME ================= -->
+        <div id="homeView" class="menu-view home-view">
+          <!-- 1 · HEADING -->
+          <div class="hero-brand home-hero">
+            <h1 class="logo-title" aria-label="SnakeChain">
+              <span class="logo-word" aria-hidden="true"><i style="--d:0">S</i><i style="--d:1">N</i><i style="--d:2">A</i><i style="--d:3">K</i><i style="--d:4">E</i></span><span class="logo-accent" aria-hidden="true"><i style="--d:5">C</i><i style="--d:6">H</i><i style="--d:7">A</i><i style="--d:8">I</i><i style="--d:9">N</i></span>
+            </h1>
+            <p class="logo-tagline">GROW YOUR CHAIN · CUT OFF THE REST</p>
+          </div>
+
+          <div class="home-body">
+            <!-- 2 · NICKNAME -->
+            <div class="name-field-wrap">
+              <div class="name-row">
+                <span id="nameAvatar" class="name-avatar" aria-hidden="true">?</span>
+                <input id="name" class="input" maxlength="14" placeholder="ENTER YOUR NICKNAME" autocomplete="off" spellcheck="false" aria-describedby="nameError" />
+              </div>
+              <p id="nameError" class="name-error hidden" role="alert">ENTER A NICKNAME TO PLAY</p>
+            </div>
+
+            <!-- 3 · MAP -->
+            <div id="modeRow" class="mode-grid" role="radiogroup" aria-label="Game mode"></div>
+
+            <!-- 4 · PLAY -->
+            <button id="play" class="btn btn-play">
+              <span class="btn-text">PLAY NOW</span>
+              <span class="btn-arrow">➔</span>
+            </button>
+
+            <!-- 5 · MAKE YOUR SNAKE -->
+            <button id="customizeBtn" class="snake-card" type="button" aria-label="Make your own snake">
+              <span id="snakeCardDots" class="snake-card-dots" aria-hidden="true"></span>
+              <span class="snake-card-txt">
+                <b>MAKE YOUR SNAKE</b>
+                <i id="snakeCardSub">HEAD ONLY · SOLID</i>
+              </span>
+              <span class="snake-card-go" aria-hidden="true">➔</span>
+            </button>
+          </div>
         </div>
 
-        <div class="deck-body">
-          <!-- LEFT COLUMN: CHAIN FORGE -->
-          <div class="deck-panel deck-left">
-            <div class="panel-top-bar">
-              <span class="panel-badge">⛓️ CUSTOMIZE YOUR CHAIN</span>
-              <span id="chainCount" class="chain-status">TAP COLORS TO EXTEND</span>
+        <!-- ================= VIEW 2: SNAKE STUDIO ================= -->
+        <div id="forgeView" class="menu-view forge-view hidden">
+          <div class="forge-page-head">
+            <button id="forgeBackBtn" class="btn-icon back-btn" type="button" aria-label="Back to home">← <span>HOME</span></button>
+            <div class="forge-titles">
+              <h2 class="forge-title">MAKE YOUR SNAKE</h2>
+              <span id="chainCount" class="chain-status">HEAD ONLY · TAP A COLOR TO BEGIN</span>
             </div>
-
-            <!-- LIVE SLITHERING PREVIEW STAGE -->
-            <div class="snake-stage">
-              <canvas id="preview" width="400" height="120"></canvas>
-              <div class="stage-sheen" aria-hidden="true"></div>
+            <div class="dock-actions forge-tools" role="toolbar" aria-label="Chain actions">
+              <button id="undoChainBtn" class="btn-mini tool" type="button" title="Remove the last link">↩ <span>UNDO</span></button>
+              <button id="shuffleChainBtn" class="btn-mini tool" type="button" title="Random chain">🎲 <span>SHUFFLE</span></button>
+              <button id="resetChainBtn" class="btn-mini tool danger" type="button" title="Reset to head only">⟲ <span>RESET</span></button>
             </div>
+          </div>
 
-            <!-- CHAIN SLOT STRIP (filled links + empty slots) -->
-            <div id="chainSlots" class="chain-slots" aria-hidden="true"></div>
+          <!-- LIVE SLITHERING PREVIEW STAGE -->
+          <div class="snake-stage forge-stage">
+            <canvas id="preview" width="480" height="160"></canvas>
+            <div class="stage-sheen" aria-hidden="true"></div>
+            <div class="stage-frame" aria-hidden="true"></div>
+          </div>
 
-            <!-- PALETTE DOCK + CHAIN ACTIONS -->
-            <div class="palette-dock">
-              <div id="swatches" class="swatches-grid"></div>
-              <div class="dock-actions">
-                <button id="undoChainBtn" class="btn-mini" type="button" title="Remove the last link">↩ UNDO</button>
-                <button id="shuffleChainBtn" class="btn-mini" type="button" title="Random chain">🎲 SHUFFLE</button>
-                <button id="resetChainBtn" class="btn-mini danger" type="button" title="Reset to head only">⟲ RESET</button>
-              </div>
+          <!-- CHAIN SLOT STRIP: tap a link to select it, tap + to grow -->
+          <div class="slots-wrap">
+            <div id="chainSlots" class="chain-slots" role="listbox" aria-label="Chain links. Select a link, then pick a color."></div>
+            <p class="forge-hint">TAP A LINK TO SELECT IT · TAP A COLOR TO PAINT IT · TAP + TO GROW</p>
+          </div>
+
+          <!-- PALETTE DOCK -->
+          <div class="palette-dock">
+            <div id="swatches" class="swatches-grid" role="listbox" aria-label="Chain colors"></div>
+          </div>
+
+          <!-- PATTERN PICKER (rendered by ui.renderPatternRow) -->
+          <div class="style-block">
+            <div class="style-head">
+              <h3 class="style-title">SKIN PATTERN</h3>
+              <span class="style-sub">FREE · RIDES WITH YOU</span>
             </div>
-
-            <!-- PATTERN PICKER (rendered by ui.renderPatternRow) -->
             <div id="patternRow" class="pattern-row" role="radiogroup" aria-label="Skin pattern"></div>
           </div>
 
-          <!-- RIGHT COLUMN: NICKNAME & PLAY -->
-          <div class="deck-panel deck-right">
-            <div class="play-action-wrap">
-              <div class="name-field-wrap">
-                <span class="input-tag">PILOT NICKNAME</span>
-                <input id="name" class="input" maxlength="14" placeholder="ENTER YOUR NICKNAME" autocomplete="off" spellcheck="false" aria-describedby="nameError" />
-                <p id="nameError" class="name-error hidden" role="alert">ENTER A NICKNAME TO PLAY</p>
-              </div>
-
-              <div id="modeRow" class="pattern-row mode-row" role="radiogroup" aria-label="Game mode"></div>
-
-              <button id="play" class="btn btn-play">
-                <span class="btn-text">PLAY NOW</span>
-                <span class="btn-arrow">➔</span>
-              </button>
-
-              <!-- Lifetime progression strip (hidden until first game) -->
-              <div id="menuStats" class="menu-stats" aria-live="polite"></div>
-            </div>
-
-            <!-- CONTROL HINTS -->
-            <div class="desktop-hints">
-              <div class="hint-pill"><kbd>MOUSE</kbd> STEER</div>
-              <div class="hint-pill boost-hint"><kbd>SPACE</kbd> BOOST</div>
-              <div class="hint-pill lobby-hint"><kbd>ESC</kbd> LOBBY</div>
-            </div>
-            <div class="mobile-hints">
-              <div class="hint-pill"><kbd>DRAG</kbd> STEER</div>
-              <div class="hint-pill boost-hint"><kbd>HOLD ⚡</kbd> BOOST</div>
-              <div class="hint-pill lobby-hint"><kbd>DOUBLE-TAP</kbd> BOOST</div>
-            </div>
+          <div class="forge-foot">
+            <button id="forgePlay" class="btn btn-play">
+              <span class="btn-text">PLAY NOW</span>
+              <span class="btn-arrow">➔</span>
+            </button>
           </div>
         </div>
       </div>
@@ -133,7 +143,7 @@
 
     <!-- HUD -->
     <div id="hud" class="hidden">
-      <!-- TOP LEFT: Small Minimap & Minimal Length -->
+    <!-- TOP LEFT: Translucent Minimap & Minimal Length -->
       <div class="hud-top-left">
         <canvas id="minimap" class="minimap-canvas" width="104" height="104" aria-label="Arena minimap"></canvas>
         <div class="hud-stat-col">
@@ -148,10 +158,12 @@
       <!-- BR COLLAPSE CHAMPION BANNER -->
       <div id="champBanner" class="champ-banner hidden" role="status"></div>
 
-      <!-- TOP RIGHT: Tiny Top 3 Rank Badge -->
-      <div id="board" class="board">
-        <div class="board-title">RANK</div>
-        <div id="boardRows"></div>
+      <!-- TOP RIGHT: Back-to-lobby + compact transparent leaderboard -->
+      <div class="hud-top-right">
+        <button id="backBtn" type="button" aria-label="Back to lobby">✕</button>
+        <div id="board" class="board">
+          <div id="boardRows"></div>
+        </div>
       </div>
 
       <!-- JOYSTICK & BOOST BUTTON -->
@@ -181,12 +193,24 @@
       </div>
     </div>
 
-    <!-- ROTATE (portrait phones) -->
+    <!-- ROTATE (portrait phones, in-game) -->
     <div id="rotateHint" class="overlay hidden">
       <div class="panel menu-panel center">
         <div class="rotate-icon" aria-hidden="true"></div>
         <h2 class="subtitle">ROTATE PHONE</h2>
         <p class="tagline">TURN SIDEWAYS FOR BEST BLOCK VIEW</p>
+      </div>
+    </div>
+
+    <!-- LANDSCAPE GATE (touch portrait phones hitting PLAY) -->
+    <div id="landscapeGate" class="overlay hidden">
+      <div class="panel menu-panel center gate-panel">
+        <div class="rotate-icon spinning" aria-hidden="true"></div>
+        <h2 class="subtitle">ROTATE FOR THE FULL ARENA</h2>
+        <p class="tagline">LANDSCAPE = WIDER VIEW · BETTER AIM</p>
+        <button id="gatePlayAnyway" class="btn btn-play gate-btn" type="button">PLAY ANYWAY ➔</button>
+        <button id="gateBack" class="btn-mini gate-back" type="button">← BACK</button>
+        <p class="gate-tip">TIP: JUST ROTATE YOUR PHONE — WE'LL DROP YOU IN</p>
       </div>
     </div>
   </div>

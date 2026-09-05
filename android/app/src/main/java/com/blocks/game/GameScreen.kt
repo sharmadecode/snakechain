@@ -6,7 +6,10 @@ import android.graphics.BitmapShader
 import android.graphics.Color as AColor
 import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
@@ -69,9 +72,11 @@ import kotlinx.coroutines.delay
 import org.json.JSONObject
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.random.Random
 
@@ -93,6 +98,9 @@ fun GameScreen(
     onRespawn: () -> Unit,
     onReconnect: () -> Unit,
     connLost: Boolean,
+    champion: String? = null,
+    pbBanner: String? = null,
+    pbBest: Int = 0,
 ) {
     var frame by remember { mutableIntStateOf(0) }
     // ~4Hz refresh signal for the HUD subtree: recomposing every Text at
@@ -136,6 +144,15 @@ fun GameScreen(
     // Reused per-frame draw buffers (no steady-state allocation).
     val sortBuf = remember { ArrayList<PlayerState>(64) }
 
+    // Smoothed camera (exp follow) with spectate fallback: SELF → killer → frozen.
+    var camX by remember { mutableFloatStateOf(0f) }
+    var camY by remember { mutableFloatStateOf(0f) }
+    var camZoom by remember { mutableFloatStateOf(1f) }
+    var camInit by remember { mutableStateOf(false) }
+
+    // Pre-rendered additive boost-glow blooms (one per palette color).
+    val boostGlows = remember { Array(12) { i -> glowBmpFor(Palette.COLORS[i]) } }
+
     val namePaint = remember {
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
@@ -165,6 +182,33 @@ fun GameScreen(
                 // stay live behind the overlays and the TTL sweep keeps
                 // running (gating on `alive` froze the whole arena).
                 state.update(dt)
+
+                // Camera: SELF → spectate target (death-cam) → frozen last view.
+                // Exponential follow (same feel as the web client); snaps on
+                // teleports >3000u so respawns never pan across the arena.
+                val selfCam = state.getSelf()
+                val spec = if (!state.alive && state.spectateId != 0) {
+                    state.players[state.spectateId]
+                } else null
+                val fx: Float
+                val fy: Float
+                val flen: Float
+                when {
+                    selfCam != null -> { fx = selfCam.x; fy = selfCam.y; flen = selfCam.len }
+                    spec != null -> { fx = spec.x; fy = spec.y; flen = spec.len }
+                    else -> { fx = Float.NaN; fy = Float.NaN; flen = 0f }
+                }
+                if (!fx.isNaN()) {
+                    val tz = max(0.62f, min(1.55f, 1.55f - flen / 3200f))
+                    if (!camInit || hypot(fx - camX, fy - camY) > 3000f) {
+                        camX = fx; camY = fy; camZoom = tz; camInit = true
+                    } else {
+                        val cf = 1f - exp(-dt * 8f)
+                        camX += (fx - camX) * cf
+                        camY += (fy - camY) * cf
+                        camZoom += (tz - camZoom) * (1f - exp(-dt * 4f))
+                    }
+                }
 
                 // Consume death FX to particles
                 if (state.deathFx.isNotEmpty()) {
@@ -231,9 +275,11 @@ fun GameScreen(
                         net.send(JSONObject().put("t", "input").put("a", a.toDouble()).put("b", boostActive))
                     }
 
-                    // Local boost flag drives the spark trail (the server's
-                    // state row always reports boost=0).
-                    state.getSelf()?.boost = boostActive
+                    // Exact boost state for SELF (remotes infer via velocity
+                    // hysteresis in GameState.applyState). Server truth: boost
+                    // only works above BOOST_MIN_LENGTH (45).
+                    val selfNow = state.getSelf()
+                    selfNow?.let { it.boostVis = boostActive && it.len > 45f }
                 } else {
                     boostActive = false
                 }
@@ -264,7 +310,7 @@ fun GameScreen(
                 val maxR = joyMaxR()
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    if (state.alive && down.position.x < size.width * 0.55f) {
+                    if (state.alive && down.position.x < size.width * 0.75f) {
                         val base = Offset(joyX, joyY)
                         joystick = Joystick(base = base, vec = Offset.Zero, active = true)
                         while (true) {
@@ -288,10 +334,7 @@ fun GameScreen(
         Canvas(Modifier.fillMaxSize()) {
             val tick = frame
             if (tick < 0) return@Canvas
-            val self = state.getSelf()
-            val camX = self?.tx ?: 0f
-            val camY = self?.ty ?: 0f
-            val zoom = self?.let { max(0.60f, min(1.55f, 1.55f - it.len / 3200f)) } ?: 1f
+            val zoom = camZoom
             val w = size.width
             val h = size.height
 
@@ -329,7 +372,7 @@ fun GameScreen(
                 drawSlitherHead(pl, sx, sy, zoom, pl.id == state.myId, pl.id == leaderId, namePaint, nameStroke, sharedPaint)
 
                 // Boost spark trail
-                if (pl.boost && particles.size < 350) {
+                if (pl.boostVis && particles.size < 350) {
                     val back = pl.a + PI.toFloat()
                     val c = Palette.base(pl.colorIdx)
                     val spread = (Random.nextFloat() - 0.5f) * 1.4f
@@ -369,13 +412,10 @@ fun GameScreen(
             val joyY = h - with(density) { 96.dp.toPx() } - bottomInsetPx()
             val jR = joyMaxR()
             val tR = joyThumbR()
-            drawCircle(
-                Color(0x3300D2FF), jR, Offset(joyX, joyY),
-                style = androidx.compose.ui.graphics.drawscope.Stroke(4f),
-            )
+            drawCircle(Color(0x59FFF8E7), jR, Offset(joyX, joyY), style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
             if (joystick.active) {
-                drawCircle(Color(0xFF00D2FF), tR, Offset(joyX, joyY) + joystick.vec)
-                drawCircle(Color(0xFFFFFFFF), tR, Offset(joyX, joyY) + joystick.vec, style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
+                drawCircle(Color(0xD9FFD93D), tR, Offset(joyX, joyY) + joystick.vec)
+                drawCircle(Color(0xD9FFFFFF), tR, Offset(joyX, joyY) + joystick.vec, style = androidx.compose.ui.graphics.drawscope.Stroke(2f))
             }
         }
 
@@ -384,6 +424,7 @@ fun GameScreen(
             killfeed = killfeed,
             refresh = hudTick,
             boostActive = boostActive,
+            champion = champion,
             onBoostChange = {
                 if (state.alive) {
                     boostActive = it
@@ -403,7 +444,8 @@ fun GameScreen(
         )
 
         if (state.dead != null && !state.alive) {
-            DeathOverlay(state.dead!!, onRespawn)
+            val spectating = (state.dead?.killerId ?: 0) > 0
+            DeathOverlay(state.dead!!, onRespawn, pbBanner, pbBest, spectating)
         }
         if (connLost) {
             ConnLostOverlay(onReconnect, onQuit)
@@ -422,6 +464,7 @@ private fun HUD(
     boostActive: Boolean,
     onBoostChange: (Boolean) -> Unit,
     onQuit: () -> Unit,
+    champion: String?,
 ) {
     Box(
         Modifier
@@ -431,7 +474,7 @@ private fun HUD(
         val f = refresh
         if (f < 0) return@Box
 
-        // Top Left: Small Minimap & Minimal Length
+        // Top Left: Translucent Minimap & Minimal Length (+ping)
         val self = state.getSelf()
         Column(
             Modifier
@@ -440,87 +483,100 @@ private fun HUD(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Box(
-                Modifier
-                    .size(96.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFFFFF8E7))
-                    .border(2.dp, Color(Palette.INK), CircleShape)
-            ) {
+            Box(Modifier.size(96.dp).clip(CircleShape)) {
                 Minimap(state, refresh)
             }
             if (self != null) {
                 Box(
                     Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFFFFD93D))
-                        .border(1.5.dp, Color(Palette.INK), RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0x73050B16))
                         .padding(horizontal = 6.dp, vertical = 1.dp),
                 ) {
-                    Text("${self.len.toInt()}", color = Color(Palette.INK), fontSize = 11.sp, fontWeight = FontWeight.Black)
+                    Text("${self.len.toInt()}", color = Color(0xFFFFD93D), fontSize = 11.sp, fontWeight = FontWeight.Black)
+                }
+            }
+            if (state.ping > 0) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0x73050B16))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                ) {
+                    Text("${state.ping}ms", color = Color(0xCCFFF8E7), fontSize = 8.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
 
-        // Top Right: Micro Top 3 Rank Card (50% Size)
-        if (state.leaderboard.isNotEmpty()) {
+        // Top Right: back-to-lobby + compact transparent leaderboard
+        Row(
+            Modifier
+                .align(Alignment.TopEnd)
+                // NOTE: root HUD Box already applies safeDrawing insets — do NOT
+                // re-apply here or content double-offsets on notched phones.
+                .padding(start = 8.dp, top = 2.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            // Back-to-lobby (mobile parity with the web HUD ✕)
             Box(
                 Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .widthIn(max = 82.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFFFFF8E7))
-                    .border(1.5.dp, Color(Palette.INK), RoundedCornerShape(6.dp))
-                    .padding(3.dp),
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color(0x66050B16))
+                    .clickable(onClick = onQuit),
+                contentAlignment = Alignment.Center,
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                    Text(
-                        "RANK",
-                        color = Color(Palette.INK),
-                        fontSize = 7.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 0.4.sp,
-                    )
-                    val medals = listOf("🥇", "🥈", "🥉")
-                    state.leaderboard.take(3).forEachIndexed { i, row ->
+                Text("✕", color = Color(0xD9FFF8E7), fontSize = 13.sp, fontWeight = FontWeight.Black)
+            }
+
+            if (state.leaderboard.isNotEmpty()) {
+                Column(
+                    Modifier
+                        .widthIn(min = 104.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0x61050B16))
+                        .padding(horizontal = 9.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    state.leaderboard.take(3).forEach { row ->
                         val id = row.optInt(0)
                         val name = row.optString(1, "...")
                         val len = row.optDouble(2, 0.0).toInt()
                         val colorIdx = row.optInt(4, 0)
                         val isMe = id == state.myId
-
+                        val nameCol = if (isMe) Color(0xFFFFD93D) else Color(0xFFFFF8E7)
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(if (isMe) Color(0xFFFFD93D) else Color.Transparent)
-                                .padding(horizontal = 1.5.dp, vertical = 0.5.dp),
+                            Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(medals.getOrElse(i) { "#${i + 1}" }, color = Color(Palette.INK), fontSize = 7.sp, fontWeight = FontWeight.Bold)
                                 Box(
                                     Modifier
-                                        .size(4.dp)
+                                        .size(5.dp)
                                         .clip(CircleShape)
-                                        .background(Color(Palette.base(colorIdx)))
+                                        .background(Color(Palette.base(colorIdx))),
                                 )
                                 Text(
                                     name,
-                                    color = Color(Palette.INK),
-                                    fontSize = 7.sp,
+                                    color = nameCol,
+                                    fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            Text("$len", color = Color(Palette.INK), fontSize = 7.sp, fontWeight = FontWeight.Black)
+                            Text(
+                                "$len",
+                                color = if (isMe) Color(0xFFFFD93D) else Color(0xBFFFFFFF),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Black,
+                            )
                         }
                     }
                 }
@@ -554,6 +610,27 @@ private fun HUD(
                 ) {
                     Text(kf.text, color = Color(Palette.INK), fontSize = 11.sp, fontWeight = FontWeight.Black)
                 }
+            }
+        }
+
+        // BR Collapse Champion Banner (below killfeed, auto-clears from MainActivity)
+        val champName = champion
+        if (champName != null) {
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 96.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF86EF2E))
+                    .border(2.dp, Color(Palette.INK), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 18.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    "👑 ${champName.uppercase()} CONQUERED THE COLLAPSE",
+                    color = Color(0xFF080B18),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Black,
+                )
             }
         }
     }
@@ -595,10 +672,10 @@ private fun Minimap(state: GameState, refresh: Int) {
 private fun BoostButton(active: Boolean, onBoostChange: (Boolean) -> Unit) {
     Box(
         Modifier
-            .size(80.dp)
+            .size(64.dp)
             .clip(CircleShape)
-            .background(if (active) Color(0xFFFF9100) else Color(0xFFFF3366))
-            .border(2.dp, Color.White, CircleShape)
+            .background(if (active) Color(0xFFFF3B30) else Color(0xE2FF5722))
+            .border(2.dp, Color(0xFF141414), CircleShape)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -624,8 +701,15 @@ private fun BoostButton(active: Boolean, onBoostChange: (Boolean) -> Unit) {
 }
 
 @Composable
-private fun DeathOverlay(st: DeadStats, onRespawn: () -> Unit) {
-    Box(Modifier.fillMaxSize().background(Color(0xB304060E)), contentAlignment = Alignment.Center) {
+private fun DeathOverlay(
+    st: DeadStats,
+    onRespawn: () -> Unit,
+    pbText: String? = null,
+    pbBest: Int = 0,
+    spectating: Boolean = false,
+) {
+    // Spectating: translucent overlay so the killer-cam action stays watchable
+    Box(Modifier.fillMaxSize().background(Color(if (spectating) 0x5904060E else 0xB304060E)), contentAlignment = Alignment.Center) {
         Box(
             Modifier
                 .width(320.dp)
@@ -646,6 +730,17 @@ private fun DeathOverlay(st: DeadStats, onRespawn: () -> Unit) {
                     letterSpacing = 1.5.sp,
                 )
                 Spacer(Modifier.height(6.dp))
+                if (pbText != null) {
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF86EF2E))
+                            .border(1.dp, Color(0xFF141414), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                    ) {
+                        Text(pbText, color = Color(0xFF080B18), fontSize = 10.sp, fontWeight = FontWeight.Black)
+                    }
+                }
                 val killerText = if (st.wall) "CRASHED INTO ARENA BOUNDARY"
                                  else if (!st.killerName.isNullOrBlank()) "ELIMINATED BY ${st.killerName.uppercase()}"
                                  else "ELIMINATED IN COMBAT"
@@ -662,7 +757,11 @@ private fun DeathOverlay(st: DeadStats, onRespawn: () -> Unit) {
                 val secs = (st.timeMs % 60000) / 1000
                 StatRow("Time Alive", "$mins m ${secs}s")
                 StatRow("Kills", "${st.kills}")
-                StatRow("Max Length", "${st.maxLen}")
+                if (pbBest > 0) {
+                    StatRow("Max Length · PB $pbBest", "${st.maxLen}")
+                } else {
+                    StatRow("Max Length", "${st.maxLen}")
+                }
                 StatRow("Final Rank", "#${st.rank}")
                 Spacer(Modifier.height(18.dp))
                 Box(
@@ -751,12 +850,45 @@ private fun JoiningOverlay() {
 }
 
 private fun makeGround(): Bitmap {
-    val s = 128
+    val s = 256
     val bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
     val c = android.graphics.Canvas(bmp)
-    c.drawColor(AColor.rgb(11, 19, 41)) // Solid plain dark blue playfield
+    c.drawColor(AColor.rgb(5, 11, 24)) // Deep dark navy playfield (matches web #050B18)
+    // Faint grid — matches the web floor pattern (alpha ~2.5%)
+    val gp = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
+        color = AColor.argb(7, 148, 163, 255)
+    }
+    var i = 0f
+    while (i <= s) {
+        c.drawLine(i, 0f, i, s.toFloat(), gp)
+        c.drawLine(0f, i, s.toFloat(), i, gp)
+        i += 64f
+    }
     return bmp
 }
+
+/** Additive boost-glow bloom bitmap for a palette color (cached per color). */
+private val glowBmps = HashMap<Int, Bitmap>()
+private val glowAddPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG).apply {
+    xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
+}
+
+private fun glowBmpFor(color: Int): Bitmap =
+    glowBmps.getOrPut(color) {
+        val s = 128
+        val bmp = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+        val g = android.graphics.Canvas(bmp)
+        val rg = RadialGradient(
+            s / 2f, s / 2f, s / 2f,
+                intArrayOf(Palette.shade(color, 0.35f), Palette.shade(color, -0.15f), 0x00000000),
+            floatArrayOf(0f, 0.45f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+        g.drawCircle(s / 2f, s / 2f, s / 2f, Paint().apply { shader = rg })
+        bmp
+    }
 
 /**
  * View test covering the snake's FULL extent: head, local path, and the
@@ -821,15 +953,45 @@ private fun DrawScope.drawFood(
 ) {
     val baseScale = max(0.65f, min(1.4f, zoom))
     val native = drawContext.canvas.nativeCanvas
+    // Eat-magnetism anchor (cosmetic): pellets near OUR head lean toward the
+    // mouth as we approach. Render offset only — never touches server truth.
+    val me = state.getSelf()
+    val magRange = 90f
+    val magPull = 22f
+    val nowMs = System.currentTimeMillis()
 
     for ((id, f) in state.food) {
         if (kotlin.math.abs(f[0] - camX) > viewR || kotlin.math.abs(f[1] - camY) > viewR) continue
-        val x = sx(f[0]); val y = sy(f[1])
+        var fxw = f[0]
+        var fyw = f[1]
+        if (me != null) {
+            val dxm = me.x - fxw
+            val dym = me.y - fyw
+            val dm = hypot(dxm, dym)
+            if (dm < magRange && dm > 1f) {
+                val pull = (1f - dm / magRange).pow(1.4f) * magPull
+                fxw += dxm / dm * pull
+                fyw += dym / dm * pull
+            }
+        }
+        val x = sx(fxw); val y = sy(fyw)
         val colorIdx = f.getOrNull(2)?.toInt() ?: 0
         val isDrop = f.getOrNull(3)?.toInt() == 1
-        val s = 11f * baseScale
+        val gold = f.getOrNull(4)?.toInt() == 1
+        val s = 11f * baseScale * (if (gold) 1.35f else 1f)
         val halfS = s / 2f
         val col = Palette.base(colorIdx)
+
+        // Golden pellet: pulsing halo ring (always on)
+        if (gold) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = max(1.5f, 2f * zoom)
+            paint.alpha = 128
+            paint.color = 0xFFFFD93D.toInt()
+            native.drawCircle(x, y, s * 2.4f * (0.85f + 0.15f * sin(nowMs * 0.005f + id)), paint)
+            paint.style = Paint.Style.FILL
+            paint.alpha = 255
+        }
 
         // 4s Death Drop Radiant Glow Halo
         if (isDrop) {
@@ -853,6 +1015,16 @@ private fun DrawScope.drawFood(
         // Top-left shiny bevel
         paint.color = Palette.shade(col, 0.45f)
         native.drawRect(x - halfS + 1.5f * zoom, y - halfS + 1.5f * zoom, x + halfS - 1.5f * zoom, y - halfS + 3f * zoom, paint)
+
+        // Golden glints: two orbiting white sparks
+        if (gold) {
+            val tw = nowMs * 0.003f + id
+            val d = s * 1.05f
+            val r2 = max(1.5f, s * 0.16f)
+            paint.color = AColor.WHITE
+            native.drawRect(x + cos(tw) * d - r2, y + sin(tw) * d - r2, x + cos(tw) * d + r2, y + sin(tw) * d + r2, paint)
+            native.drawRect(x - cos(tw) * d - r2, y - sin(tw) * d - r2, x - cos(tw) * d + r2, y - sin(tw) * d + r2, paint)
+        }
     }
 }
 
@@ -901,7 +1073,7 @@ private fun DrawScope.drawSlitherBody(
     val maxDist = min(totalDist, pl.len)
 
     // Pre-calculate spine block positions stepping from head to tail with tight overlapping steps
-    class SpineBlock(val wx: Float, val wy: Float, val angle: Float, val size: Float, val blockIdx: Int)
+    class SpineBlock(val wx: Float, val wy: Float, val angle: Float, val size: Float, val blockIdx: Int, val distTail: Float)
     val blocks = ArrayList<SpineBlock>(200)
     // Resolve the color cycle once per snake (per-block unpack was hundreds
     // of IntArray allocations per frame).
@@ -927,7 +1099,7 @@ private fun DrawScope.drawSlitherBody(
             val wx = spinePtsX[j] + (spinePtsX[j + 1] - spinePtsX[j]) * t
             val wy = spinePtsY[j] + (spinePtsY[j + 1] - spinePtsY[j]) * t
             val angle = kotlin.math.atan2(spinePtsY[j] - spinePtsY[j + 1], spinePtsX[j] - spinePtsX[j + 1])
-            blocks.add(SpineBlock(wx, wy, angle, curSize, bIdx))
+            blocks.add(SpineBlock(wx, wy, angle, curSize, bIdx, distFromTail))
         }
 
         val step = max(3.5f, curSize * 0.40f)
@@ -944,13 +1116,31 @@ private fun DrawScope.drawSlitherBody(
         val discX = sx(blk.wx)
         val discY = sy(blk.wy)
         val col = Palette.base(cycle[((blk.blockIdx % nCol) + nCol) % nCol])
+        val pat = pl.patternIdx % 6
+
+        // Pattern face color (mirrors web sprite variants):
+        // 2 fade toward tail · 4 dark bands (pairs) · 5 ink accents (every 4th)
+        var faceCol = col
+        when (pat) {
+            2 -> faceCol = Palette.shade(col, -0.45f * (blk.distTail / maxDist).coerceIn(0f, 1f))
+            4 -> if ((blk.blockIdx / 2) % 2 == 0) faceCol = Palette.shade(col, -0.30f)
+            5 -> if (blk.blockIdx % 4 == 0) faceCol = Palette.shade(col, -0.78f)
+            else -> {}
+        }
 
         native.save()
         native.translate(discX, discY)
         native.rotate((blk.angle * 180f / Math.PI.toFloat()))
 
+        // BOOST GLOW: additive bloom in THIS block's own chain color.
+        if (pl.boostVis) {
+            val gr = blk.size * 1.9f
+            glowAddPaint.alpha = (150 + 60 * sin(System.currentTimeMillis() * 0.01 + idx)).toInt().coerceIn(0, 255)
+            native.drawBitmap(glowBmpFor(col), null, RectF(-gr, -gr, gr, gr), glowAddPaint)
+        }
+
         // 1. Block Face Fill
-        paint.color = col
+        paint.color = faceCol
         native.drawRoundRect(-curHalf, -curHalf, curHalf, curHalf, 6f * zoom, 6f * zoom, paint)
 
         // 2. Thick Ink Outline
@@ -961,8 +1151,24 @@ private fun DrawScope.drawSlitherBody(
         paint.style = Paint.Style.FILL
 
         // 3. Inner Bevel Highlight
-        paint.color = Palette.shade(col, 0.4f)
+        paint.color = Palette.shade(faceCol, 0.4f)
         native.drawRect(-curHalf + 2f * zoom, -curHalf + 2f * zoom, curHalf - 2f * zoom, -curHalf + 4.5f * zoom, paint)
+
+        // Stripes pattern: two ink bands ACROSS the body (local Y direction)
+        if (pat == 1) {
+            paint.color = 0x4D141414.toInt()
+            native.drawRect(-curHalf * 0.55f, -curHalf, -curHalf * 0.20f, curHalf, paint)
+            native.drawRect(curHalf * 0.20f, -curHalf, curHalf * 0.55f, curHalf, paint)
+        }
+
+        // Spots pattern: centered contrasting square on alternating blocks
+        if (pat == 3 && blk.blockIdx % 2 == 0) {
+            paint.color = 0x61141414.toInt()
+            native.drawRoundRect(
+                -curHalf * 0.32f, -curHalf * 0.32f, curHalf * 0.32f, curHalf * 0.32f,
+                3f * zoom, 3f * zoom, paint,
+            )
+        }
 
         native.restore()
     }
@@ -984,6 +1190,13 @@ private fun DrawScope.drawSlitherHead(
     native.save()
     native.translate(hx, hy)
     native.rotate((pl.a * 180f / Math.PI.toFloat()))
+
+    // Boost glow behind the head (matches body bloom — own chain color)
+    if (pl.boostVis) {
+        val gr = headSize * 1.15f
+        glowAddPaint.alpha = (170 + 60 * sin(System.currentTimeMillis() * 0.01)).toInt().coerceIn(0, 255)
+        native.drawBitmap(glowBmpFor(headCol), null, RectF(-gr, -gr, gr, gr), glowAddPaint)
+    }
 
     // 1. Head Main Block
     paint.color = headCol
@@ -1029,6 +1242,24 @@ private fun DrawScope.drawSlitherHead(
     }
 
     native.restore()
+
+    // Fresh-spawn shield shimmer (server flag slot 9) — pulsing cream outline
+    if (pl.shield) {
+        val pulse = 0.55f + 0.35f * sin(System.currentTimeMillis() * 0.006f)
+        paint.color = AColor.argb((pulse * 255).toInt().coerceIn(0, 255), 255, 248, 231)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(2f, 3f * zoom)
+        native.save()
+        native.translate(hx, hy)
+        native.rotate((pl.a * 180f / Math.PI.toFloat()))
+        native.drawRoundRect(
+            -halfHead - 5f * zoom, -halfHead - 5f * zoom,
+            halfHead + 5f * zoom, halfHead + 5f * zoom,
+            12f * zoom, 12f * zoom, paint,
+        )
+        native.restore()
+        paint.style = Paint.Style.FILL
+    }
 
     // 5. Crown on #1 Leader
     if (isLeader) {

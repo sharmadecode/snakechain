@@ -1,7 +1,7 @@
 import puppeteer from "puppeteer-core";
 
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
-const URL = process.env.TEST_URL ?? "http://127.0.0.1:8787/";
+const URL = process.env.TEST_URL ?? "http://127.0.0.1:8787/?nogate=1";
 
 const viewports = [
   { name: "desktop-1440x900", width: 1440, height: 900 },
@@ -216,7 +216,10 @@ for (let vi = 0; vi < viewports.length; vi++) {
         const b = el.getBoundingClientRect();
         rects[id] = { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height };
         const empty = id === "killfeed" && el.children.length === 0;
-        if (!empty && (b.width <= 0 || b.height <= 0)) bad.push(id + ":zero-size");
+        // display:none is a by-design state (boostBtn hides on fine-pointer
+        // desktops where Space/LMB boosts) — not a layout bug.
+        const designedHidden = getComputedStyle(el).display === "none";
+        if (!empty && !designedHidden && (b.width <= 0 || b.height <= 0)) bad.push(id + ":zero-size");
         if (b.left < -1 || b.top < -1 || b.right > innerWidth + 1 || b.bottom > innerHeight + 1)
           bad.push(id + ":out-of-bounds");
       }

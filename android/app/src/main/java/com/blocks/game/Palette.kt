@@ -28,6 +28,10 @@ object Palette {
     }
 
     fun unpack(packed: Int): IntArray {
+        // packed == 1 is DEFINED as the canonical [0] chain (yellow head) —
+        // mirrors web/src/patterns.ts exactly. Without this, a pure-yellow
+        // head rendered as orange on Android.
+        if (packed == 1) return intArrayOf(0)
         if (packed < 12) {
             return intArrayOf(packed)
         }

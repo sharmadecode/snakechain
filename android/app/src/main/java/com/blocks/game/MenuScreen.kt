@@ -42,6 +42,7 @@ data class MenuPrefs(
     val name: String,
     val color: Int,
     val pattern: Int,
+    val mode: String = "classic",
     val server: String,
 )
 
@@ -49,12 +50,14 @@ data class MenuPrefs(
 fun MenuScreen(
     initial: MenuPrefs,
     serverStatus: String,
+    menuStats: String = "",
     onPlay: (MenuPrefs) -> Unit,
 ) {
     var name by remember { mutableStateOf(initial.name) }
     var server by remember { mutableStateOf(initial.server) }
     var colorIdx by remember { mutableStateOf(initial.color) }
     var patternIdx by remember { mutableStateOf(initial.pattern) }
+    var mode by remember { mutableStateOf(initial.mode) }
     var nameError by remember { mutableStateOf(false) }
 
     Box(
@@ -136,6 +139,13 @@ fun MenuScreen(
 
                 FieldLabel("SERVER")
                 SlitherField(value = server, onChange = { server = it }, placeholder = "ws://host:8787/ws")
+                Spacer(Modifier.height(10.dp))
+
+                FieldLabel("ARENA")
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ModePill(label = "CLASSIC", icon = "🗺️", selected = mode == "classic", onClick = { mode = "classic" })
+                    ModePill(label = "COLLAPSE", icon = "🌀", selected = mode == "br", onClick = { mode = "br" })
+                }
                 Spacer(Modifier.height(16.dp))
 
                 Box(
@@ -147,7 +157,7 @@ fun MenuScreen(
                             val n = name.trim()
                             if (n.isNotEmpty()) {
                                 nameError = false
-                                onPlay(MenuPrefs(n, colorIdx, patternIdx, server.trim()))
+                                onPlay(MenuPrefs(n, colorIdx, patternIdx, mode, server.trim()))
                             } else {
                                 nameError = true
                             }
@@ -172,6 +182,17 @@ fun MenuScreen(
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
                 )
+                if (menuStats.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        menuStats,
+                        color = Color(0xB3FFF8E7),
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.5.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "touch left = steer · tap BOOST = speed burst",
@@ -183,6 +204,32 @@ fun MenuScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ModePill(label: String, icon: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) Color(0x29FFD93D) else Color(0x14FFFFFF))
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) Color(0xFFFFD93D) else Color(0x33FFFFFF),
+                RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(icon, fontSize = 11.sp)
+        Text(
+            label,
+            color = if (selected) Color(0xFFFFD93D) else Color(0xCCFFFFFF),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Black,
+        )
     }
 }
 

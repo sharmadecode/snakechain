@@ -254,6 +254,11 @@ ui.setOnPlay(() => {
 });
 
 document.getElementById("respawn")!.addEventListener("click", sendJoin);
+document.getElementById("backBtn")?.addEventListener("click", (e) => {
+  // In-game back button: returns to the lobby from ANY state (playing/dead).
+  e.stopPropagation();
+  backToLobby();
+});
 document.getElementById("reconnect")!.addEventListener("click", () => {
   joined = true;
   retryCount = 0; // explicit user action — full fresh retry budget
@@ -272,12 +277,12 @@ if (soundBtn) {
   // Restore the persisted mute state BEFORE first audio init so a muted
   // player never gets an AudioContext unlocked by their next click.
   audio.enabled = ui.prefs.sound !== false;
-  soundBtn.textContent = audio.enabled ? "🔊 SFX" : "🔇 SFX";
+  soundBtn.textContent = audio.enabled ? "🔊" : "🔇";
   soundBtn.addEventListener("click", () => {
     const on = audio.toggle();
     ui.prefs.sound = on;
     ui.savePrefs();
-    soundBtn.textContent = on ? "🔊 SFX" : "🔇 SFX";
+    soundBtn.textContent = on ? "🔊" : "🔇";
   });
 }
 

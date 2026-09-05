@@ -92,5 +92,29 @@ class NetClient(
             .pingInterval(15, TimeUnit.SECONDS)
             .connectTimeout(6, TimeUnit.SECONDS)
             .build()
+
+        private val main = Handler(Looper.getMainLooper())
+
+        /** Async GET /health → parses "alive" (−1 on any failure). Used by the
+            menu's IN-ARENA counter; runs on OkHttp's dispatcher, posts to main. */
+        fun fetchHealth(url: String, onResult: (Int) -> Unit) {
+            sharedClient.newCall(Request.Builder().url(url).build()).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    main.post { onResult(-1) }
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    val alive = try {
+                        val body = response.body?.string() ?: "{}"
+                        JSONObject(body).optInt("alive", -1)
+                    } catch (_: Exception) {
+                        -1
+                    } finally {
+                        response.close()
+                    }
+                    main.post { onResult(alive) }
+                }
+            })
+        }
     }
 }

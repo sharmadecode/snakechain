@@ -1,5 +1,5 @@
 import { GameState, DeadStats } from "./state";
-import { baseColor, packColors, unpackColors, shade, INK, CREAM, PALETTE } from "./patterns";
+import { baseColor, packColors, unpackColors, shade, INK, PALETTE } from "./patterns";
 import { Input } from "./input";
 import { audio } from "./audio";
 
@@ -34,10 +34,26 @@ const STATS_KEY = "blocks.stats";
 export const PATTERNS = ["SOLID", "STRIPES", "FADE", "SPOTS", "BANDS", "ACCENT"] as const;
 
 /** Logical (design-unit) backing sizes for the DPR-aware canvases. */
-const PREVIEW_W = 400;
-const PREVIEW_H = 120;
+const PREVIEW_W = 480;
+const PREVIEW_H = 160;
 const MINIMAP_SIZE = 104;
 const CHAIN_MAX = 8;
+
+/** Human-readable palette names for tooltips / a11y. */
+const COLOR_NAMES = [
+  "VOLT YELLOW", "MAGMA ORANGE", "ABYSS CYAN", "ACID LIME",
+  "BUBBLEGUM", "VOID VIOLET", "REEF TEAL", "ALARM RED",
+  "CORAL", "LAVENDER", "AMBER GOLD", "GHOST WHITE",
+] as const;
+
+const PATTERN_DESCS = [
+  "Clean flat faces",
+  "Twin racing stripes",
+  "Head-bright tail fade",
+  "Spotted hunter",
+  "Paired dark bands",
+  "Black-ops accents",
+] as const;
 
 export class UI {
   prefs: Prefs = {
@@ -170,20 +186,7 @@ export class UI {
     return { newBest, newKills, bestLen: this.stats.bestLen };
   }
 
-  /** Menu strip: BEST len · TOP KILLS · GAMES (hidden when no games yet). */
-  private renderMenuStats(): void {
-    const el = document.getElementById("menuStats");
-    if (!el) return;
-    if (this.stats.games === 0) {
-      el.textContent = "";
-      return;
-    }
-    el.textContent =
-      `PERSONAL BEST ${this.stats.bestLen} · TOP KILLS ${this.stats.mostKills} · GAMES ${this.stats.games}`;
-  }
-
-  /** Pattern picker: one pill per pattern, mini canvas preview drawn in the
-      current head color so the row re-renders when the chain changes. */
+  /** Pattern picker: 6 cards with live head-color previews + descriptions. */
   private renderPatternRow(): void {
     const host = document.getElementById("patternRow");
     if (!host || host.dataset.built === "1") return;
@@ -192,10 +195,13 @@ export class UI {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "pat-pill" + (this.prefs.pattern === i ? " active" : "");
-      btn.title = `${label} pattern`;
+      btn.title = `${label} — ${PATTERN_DESCS[i] ?? ""}`;
+      btn.setAttribute("role", "radio");
+      btn.setAttribute("aria-checked", this.prefs.pattern === i ? "true" : "false");
+      btn.setAttribute("aria-label", `${label} pattern`);
       const cv = document.createElement("canvas");
-      cv.width = 40;
-      cv.height = 20;
+      cv.width = 56;
+      cv.height = 26;
       cv.className = "pat-preview";
       btn.appendChild(cv);
       const span = document.createElement("span");
@@ -205,8 +211,13 @@ export class UI {
         this.prefs.pattern = i;
         this.savePrefs();
         audio.playTick(560 + i * 40);
-        host.querySelectorAll(".pat-pill").forEach((b) => b.classList.remove("active"));
+        host.querySelectorAll(".pat-pill").forEach((b) => {
+          b.classList.remove("active");
+          b.setAttribute("aria-checked", "false");
+        });
         btn.classList.add("active");
+        btn.setAttribute("aria-checked", "true");
+        this.syncSnakeCard();
       });
       host.appendChild(btn);
     });
@@ -220,27 +231,51 @@ export class UI {
     const headCol = baseColor(this.prefs.colors[0] ?? 0);
     const linkCol = baseColor(this.prefs.colors[1] ?? this.prefs.colors[0] ?? 0);
     host.querySelectorAll("canvas.pat-preview").forEach((cv, i) => {
-      const g = (cv as HTMLCanvasElement).getContext("2d")!;
-      g.clearRect(0, 0, 40, 20);
+      const c = cv as HTMLCanvasElement;
+      // Match the CSS card size; keep backing store 2x for retina.
+      const W = 56;
+      const H = 26;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (c.width !== W * dpr) {
+        c.width = W * dpr;
+        c.height = H * dpr;
+        c.style.width = `${W}px`;
+        c.style.height = `${H}px`;
+      }
+      const g = c.getContext("2d")!;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
       for (let k = 0; k < 4; k++) {
         let col = k % 2 === 0 ? headCol : linkCol;
         if (i === 4 && Math.floor(k / 2) % 2 === 0) col = shade(col, -0.3);
         if (i === 5 && k % 4 === 0) col = shade(headCol, -0.78);
         g.fillStyle = col;
-        g.fillRect(k * 10 + 1, 3, 8, 14);
+        g.beginPath();
+        g.roundRect(k * 14 + 1, 4, 12, 18, 4);
+        g.fill();
         g.strokeStyle = INK;
         g.lineWidth = 1.5;
-        g.strokeRect(k * 10 + 1, 3, 8, 14);
+        g.stroke();
       }
       if (i === 1) {
         g.fillStyle = "rgba(20,20,20,0.35)";
-        g.fillRect(11, 4, 2, 12);
-        g.fillRect(29, 4, 2, 12);
+        g.fillRect(15, 5, 3, 16);
+        g.fillRect(39, 5, 3, 16);
       }
       if (i === 3) {
         g.fillStyle = "rgba(20,20,20,0.4)";
-        g.fillRect(13, 7, 4, 6);
-        g.fillRect(33, 7, 4, 6);
+        g.beginPath();
+        g.roundRect(16, 9, 6, 8, 2);
+        g.roundRect(44, 9, 6, 8, 2);
+        g.fill();
+      }
+      if (i === 2) {
+        // fade: bright head chip → dark tail chip
+        const grad = g.createLinearGradient(0, 0, W, 0);
+        grad.addColorStop(0, "rgba(255,255,255,0.35)");
+        grad.addColorStop(1, "rgba(0,0,0,0.35)");
+        g.fillStyle = grad;
+        g.fillRect(1, 4, W - 2, 18);
       }
     });
   }
@@ -251,6 +286,178 @@ export class UI {
   }
 
   private isInitialHeadSelection = true;
+  /** Which chain link the next swatch tap paints. null = append-mode (+ slot). */
+  private selectedLink: number | null = null;
+
+  /** Keep the nickname avatar dot in sync with the head color + name. */
+  private syncAvatar(): void {
+    const av = document.getElementById("nameAvatar");
+    if (!av) return;
+    const headCol = baseColor(this.prefs.colors[0] ?? 0);
+    av.style.background = headCol;
+    const nameVal = (document.getElementById("name") as HTMLInputElement | null)?.value.trim();
+    av.textContent = (nameVal?.[0] ?? "?").toUpperCase();
+  }
+
+  /** Home snake card: live dots summary of YOUR chain + pattern. */
+  private syncSnakeCard(): void {
+    const dots = document.getElementById("snakeCardDots");
+    const sub = document.getElementById("snakeCardSub");
+    if (dots) {
+      dots.innerHTML = "";
+      this.prefs.colors.forEach((c, i) => {
+        const d = document.createElement("i");
+        if (i === 0) d.className = "head";
+        d.style.background = baseColor(c);
+        dots.appendChild(d);
+      });
+    }
+    if (sub) {
+      const n = this.prefs.colors.length;
+      const pat = PATTERNS[this.prefs.pattern] ?? "SOLID";
+      sub.textContent = n === 1 ? `HEAD ONLY · ${pat}` : `${n} LINKS · ${pat}`;
+    }
+  }
+
+  /** View switching: clean home <-> dedicated snake studio. */
+  showForge(): void {
+    document.getElementById("homeView")?.classList.add("hidden");
+    document.getElementById("forgeView")?.classList.remove("hidden");
+    this.startPreviewAnimation();
+    audio.playTick(660);
+  }
+
+  showHome(): void {
+    document.getElementById("forgeView")?.classList.add("hidden");
+    document.getElementById("homeView")?.classList.remove("hidden");
+    this.syncSnakeCard();
+    audio.playTick(520);
+  }
+
+  /** Shared PLAY submit (home PLAY + studio PLAY use the same path).
+      Touch-portrait phones get the landscape gate first (once per session). */
+  private submitPlay(): void {
+    const nameInput = this.el("name") as HTMLInputElement;
+    const name = nameInput.value.trim();
+    if (!name) {
+      // If they tapped PLAY from the studio, bring them home to the name
+      // field instead of stranding them on the error.
+      this.showHome();
+      this.el("name").focus();
+      this.flashNameInvalid();
+      return;
+    }
+    this.prefs.name = name;
+    this.savePrefs();
+    if (this.needsLandscapeGate()) {
+      this.gatePending = true;
+      this.showLandscapeGate();
+      return;
+    }
+    this.onPlay(this.prefs);
+  }
+
+  // ---- Landscape gate (portrait landing -> landscape arena) ---------------
+
+  private gatePending = false;
+  private static readonly GATE_KEY = "blocks.landscapeNudge";
+
+  private isCoarseTouch(): boolean {
+    return window.matchMedia("(pointer: coarse)").matches;
+  }
+
+  private isPortrait(): boolean {
+    return window.matchMedia("(orientation: portrait)").matches;
+  }
+
+  /** True when we should nudge: touch phone, portrait, not yet dismissed.
+      `?nogate=1` opts out (automation harnesses, power users) — same
+      precedent as the `?dbg` flag in main.ts. */
+  private needsLandscapeGate(): boolean {
+    try {
+      if (new URLSearchParams(location.search).has("nogate")) return false;
+    } catch {
+      /* URL unavailable — fall through to the normal checks */
+    }
+    if (!this.isCoarseTouch() || !this.isPortrait()) return false;
+    try {
+      if (sessionStorage.getItem(UI.GATE_KEY) === "1") return false;
+    } catch {
+      /* storage unavailable — nag every time rather than never */
+    }
+    return true;
+  }
+
+  private showLandscapeGate(): void {
+    document.getElementById("landscapeGate")?.classList.remove("hidden");
+    audio.playTick(440);
+  }
+
+  private hideLandscapeGate(): void {
+    document.getElementById("landscapeGate")?.classList.add("hidden");
+  }
+
+  isLandscapeGateOpen(): boolean {
+    return !(document.getElementById("landscapeGate")?.classList.contains("hidden") ?? true);
+  }
+
+  /** User rotated into landscape with the gate open — drop them straight in. */
+  private autoProceedOnLandscape(): void {
+    if (!this.gatePending || !this.isLandscapeGateOpen()) return;
+    if (this.isPortrait()) return;
+    this.proceedPendingJoin(false);
+  }
+
+  /** Resolve the pending join: remember the choice, close the gate, play. */
+  private proceedPendingJoin(remember: boolean): void {
+    if (remember) {
+      try {
+        sessionStorage.setItem(UI.GATE_KEY, "1");
+      } catch {
+        /* storage unavailable */
+      }
+    }
+    this.gatePending = false;
+    this.hideLandscapeGate();
+    this.onPlay(this.prefs);
+  }
+
+  private wireLandscapeGate(): void {
+    document.getElementById("gatePlayAnyway")?.addEventListener("click", () => {
+      // Portrait anyway — don't nag again this session.
+      this.proceedPendingJoin(true);
+    });
+    document.getElementById("gateBack")?.addEventListener("click", () => {
+      this.gatePending = false;
+      this.hideLandscapeGate();
+    });
+    // Rotating with the gate open auto-joins (the magic path).
+    window.addEventListener("orientationchange", () => {
+      // orientationchange fires before the layout flips — defer one frame.
+      window.setTimeout(() => this.autoProceedOnLandscape(), 120);
+    });
+    window.addEventListener("resize", () => this.autoProceedOnLandscape());
+  }
+
+  /** Paint swatch selected/in-use states from the current chain. */
+  private refreshSwatches(): void {
+    const host = document.getElementById("swatches");
+    if (!host) return;
+    const counts = new Map<number, number>();
+    for (const c of this.prefs.colors) counts.set(c, (counts.get(c) ?? 0) + 1);
+    host.querySelectorAll(".swatch").forEach((el) => {
+      const idx = Number((el as HTMLElement).dataset.ci ?? -1);
+      const n = counts.get(idx) ?? 0;
+      el.classList.toggle("in-use", n > 0);
+      if (n > 0) el.setAttribute("data-count", String(n));
+      else el.removeAttribute("data-count");
+      const sel =
+        this.selectedLink !== null
+          ? this.prefs.colors[this.selectedLink] === idx
+          : false;
+      el.classList.toggle("selected", sel);
+    });
+  }
 
   buildMenu(): void {
     const nameInput = this.el("name") as HTMLInputElement;
@@ -261,6 +468,7 @@ export class UI {
         this.el("play").click();
       }
     });
+    nameInput.addEventListener("input", () => this.syncAvatar());
 
     // REDO Button (reset whole chain) + UNDO / SHUFFLE chain actions.
     const resetBtn = document.getElementById("resetChainBtn");
@@ -268,6 +476,7 @@ export class UI {
       resetBtn.addEventListener("click", () => {
         this.prefs.colors = [this.prefs.colors[0] ?? 0];
         this.isInitialHeadSelection = true;
+        this.selectedLink = null;
         this.savePrefs();
         audio.playTick(300);
         this.updateChainIndicator();
@@ -284,7 +493,7 @@ export class UI {
       shuffleBtn.addEventListener("click", () => this.shuffleChain());
     }
 
-    // Build 12 Color Swatches
+    // Build 12 Color Swatches with names + a11y roles.
     const swatches = this.el("swatches");
     swatches.innerHTML = "";
     PALETTE.forEach((c, i) => {
@@ -292,7 +501,10 @@ export class UI {
       d.type = "button";
       d.className = "swatch";
       d.style.background = c;
-      d.setAttribute("aria-label", `color ${i + 1}`);
+      d.dataset.ci = String(i);
+      d.title = COLOR_NAMES[i] ?? `Color ${i + 1}`;
+      d.setAttribute("role", "option");
+      d.setAttribute("aria-label", `Paint selected link ${COLOR_NAMES[i] ?? i + 1}`);
       d.addEventListener("click", () => {
         // One-shot bounce on the tapped swatch (restart-safe).
         d.classList.remove("pop");
@@ -306,24 +518,20 @@ export class UI {
     this.updateChainIndicator();
     this.renderPatternRow();
     this.renderModeRow();
-    this.renderMenuStats();
+    this.syncAvatar();
+    this.syncSnakeCard();
     this.startPreviewAnimation();
     this.attachPreviewPointer();
-    this.startOnlineCounter();
     this.buildMenuBackdrop();
     this.attachDeckParallax();
 
-    this.el("play").addEventListener("click", () => {
-      const name = nameInput.value.trim();
-      if (!name) {
-        nameInput.focus();
-        this.flashNameInvalid();
-        return;
-      }
-      this.prefs.name = name;
-      this.savePrefs();
-      this.onPlay(this.prefs);
-    });
+    // Home <-> studio navigation.
+    document.getElementById("customizeBtn")?.addEventListener("click", () => this.showForge());
+    document.getElementById("forgeBackBtn")?.addEventListener("click", () => this.showHome());
+    this.wireLandscapeGate();
+
+    this.el("play").addEventListener("click", () => this.submitPlay());
+    document.getElementById("forgePlay")?.addEventListener("click", () => this.submitPlay());
   }
 
   /** Inline nickname-required feedback: shake the field and show the hint. */
@@ -338,12 +546,24 @@ export class UI {
 
   private onColorTapped(colorIdx: number): void {
     if (this.prefs.colors.length === 1 && this.isInitialHeadSelection) {
-      // First tap sets the head color
+      // First tap sets the head color, then auto-advance to append-mode.
       this.prefs.colors[0] = colorIdx;
       this.isInitialHeadSelection = false;
+      this.selectedLink = null;
+    } else if (this.selectedLink !== null && this.selectedLink < this.prefs.colors.length) {
+      // Paint the selected link in place (the real "edit my chain" flow).
+      this.prefs.colors[this.selectedLink] = colorIdx;
+      // Advance to the next link so rapid taps paint down the chain.
+      this.selectedLink =
+        this.selectedLink + 1 < this.prefs.colors.length ? this.selectedLink + 1 : null;
     } else if (this.prefs.colors.length < CHAIN_MAX) {
-      // Each subsequent tap adds a cube with that color to the snake chain
+      // Append-mode: each tap grows the chain; stay in append-mode.
       this.prefs.colors.push(colorIdx);
+      this.selectedLink = null;
+    } else {
+      // Full chain + no selection: repaint the tail so taps always do something.
+      this.prefs.colors[CHAIN_MAX - 1] = colorIdx;
+      this.selectedLink = null;
     }
     audio.playTick(560 + this.prefs.colors.length * 40);
     this.savePrefs();
@@ -360,6 +580,9 @@ export class UI {
       return;
     }
     this.prefs.colors.pop();
+    if (this.selectedLink !== null && this.selectedLink >= this.prefs.colors.length) {
+      this.selectedLink = null;
+    }
     audio.playTick(340);
     this.savePrefs();
     this.updateChainIndicator();
@@ -376,6 +599,7 @@ export class UI {
     }
     this.prefs.colors = chain;
     this.isInitialHeadSelection = false;
+    this.selectedLink = null;
     this.refreshPatternPreviews();
     audio.playTick(820);
     window.setTimeout(() => audio.playTick(980), 90);
@@ -384,26 +608,59 @@ export class UI {
     this.drawPreview();
   }
 
-  /** Chain-slot strip under the stage: filled links + dashed empty slots. */
+  /** Chain workbench strip: selectable links + a + grow slot. */
   private renderChainSlots(): void {
     const host = document.getElementById("chainSlots");
     if (!host) return;
     host.innerHTML = "";
     const n = this.prefs.colors.length;
     for (let i = 0; i < CHAIN_MAX; i++) {
-      const s = document.createElement("span");
+      const s = document.createElement("button");
+      s.type = "button";
       s.className = "slot";
       if (i < n) {
         const col = baseColor(this.prefs.colors[i]!);
         s.classList.add("filled");
         if (i === 0) s.classList.add("head");
         if (i === n - 1) s.classList.add("last");
+        if (this.selectedLink === i) s.classList.add("selected");
         s.style.background = col;
-        s.title = i === 0 ? "HEAD" : `LINK ${i}`;
-        if (i === 0) s.textContent = "H";
+        s.title = i === 0 ? "HEAD — tap to repaint" : `LINK ${i} — tap to repaint`;
+        s.setAttribute("aria-label", i === 0 ? "Head link, select to repaint" : `Chain link ${i}, select to repaint`);
+        s.setAttribute("aria-pressed", this.selectedLink === i ? "true" : "false");
+        if (i === 0) s.textContent = "◉";
+        const idx = i;
+        s.addEventListener("click", () => {
+          this.selectedLink = this.selectedLink === idx ? null : idx;
+          if (this.selectedLink !== null) this.isInitialHeadSelection = false;
+          audio.playTick(500 + idx * 30);
+          this.updateChainIndicator();
+        });
       } else {
         s.classList.add("add");
         s.textContent = "+";
+        s.title = "Grow the chain";
+        s.setAttribute("aria-label", "Add a new chain link");
+        if (i > n) {
+          (s as HTMLButtonElement).disabled = true;
+          s.style.opacity = "0.35";
+        } else {
+          s.addEventListener("click", () => {
+            // + slot: append a copy of the tail color (or head if lonely),
+            // then select the new link so the next swatch paints it.
+            const tail = this.prefs.colors[this.prefs.colors.length - 1] ?? 0;
+            if (this.prefs.colors.length < CHAIN_MAX) {
+              this.prefs.colors.push(tail);
+              this.selectedLink = this.prefs.colors.length - 1;
+              this.isInitialHeadSelection = false;
+              audio.playTick(700);
+              this.savePrefs();
+              this.updateChainIndicator();
+              this.drawPreview();
+              this.refreshPatternPreviews();
+            }
+          });
+        }
       }
       host.appendChild(s);
     }
@@ -411,19 +668,28 @@ export class UI {
 
   private updateChainIndicator(): void {
     const el = document.getElementById("chainCount");
-    if (!el) return;
-    const n = this.prefs.colors.length;
-    if (n === 1) {
-      el.textContent = "TAP COLORS TO EXTEND CHAIN";
-    } else if (n < CHAIN_MAX) {
-      el.textContent = `CHAIN LENGTH: ${n} · TAP TO ADD`;
-    } else {
-      el.textContent = "CHAIN READY · MAX LINKS";
+    if (el) {
+      const n = this.prefs.colors.length;
+      if (n === 1) {
+        el.textContent = "HEAD ONLY · TAP A COLOR TO BEGIN";
+      } else if (this.selectedLink !== null) {
+        el.textContent =
+          this.selectedLink === 0
+            ? `EDITING HEAD · ${n}/${CHAIN_MAX} LINKS`
+            : `EDITING LINK ${this.selectedLink} · ${n}/${CHAIN_MAX} LINKS`;
+      } else if (n < CHAIN_MAX) {
+        el.textContent = `${n}/${CHAIN_MAX} LINKS · TAP + OR A COLOR TO GROW`;
+      } else {
+        el.textContent = `MAX ${CHAIN_MAX} LINKS · TAP A LINK TO REPAINT`;
+      }
+      el.classList.remove("pop");
+      void el.offsetWidth; // restart the CSS animation
+      el.classList.add("pop");
     }
-    el.classList.remove("pop");
-    void el.offsetWidth; // restart the CSS animation
-    el.classList.add("pop");
     this.renderChainSlots();
+    this.refreshSwatches();
+    this.syncAvatar();
+    this.syncSnakeCard();
   }
 
   private previewAnimId: number = 0;
@@ -433,7 +699,10 @@ export class UI {
     if (this.previewAnimId) return;
     const loop = (t: number) => {
       this.previewTime = t * 0.003;
-      this.drawPreview();
+      // The stage lives in the studio view — skip offscreen draws while the
+      // player sits on clean home (battery + thermals on mobile).
+      const forgeHidden = document.getElementById("forgeView")?.classList.contains("hidden") ?? false;
+      if (!forgeHidden) this.drawPreview();
       const menuEl = document.getElementById("menu");
       if (menuEl && !menuEl.classList.contains("hidden")) {
         this.previewAnimId = requestAnimationFrame(loop);
@@ -457,40 +726,6 @@ export class UI {
     });
   }
 
-  /** Live "IN ARENA" counter fed by the server's own /health endpoint.
-      Runs ONLY while the menu is visible — a permanently-running poller
-      would (a) waste requests during gameplay and (b) keep an idle Render
-      free instance awake forever whenever any tab is merely open. */
-  private onlineTimer: number | null = null;
-
-  private startOnlineCounter(): void {
-    const el = document.getElementById("onlineCount");
-    if (!el || this.onlineTimer !== null) return;
-    const update = async (): Promise<void> => {
-      try {
-        const res = await fetch("/health", { cache: "no-store" });
-        if (!res.ok) return;
-        const j = (await res.json()) as { alive?: unknown; humans?: unknown };
-        const n = typeof j.alive === "number" ? j.alive : undefined;
-        if (typeof n === "number") {
-          el.textContent = `${n} IN ARENA`;
-          el.classList.toggle("hot", n > 0);
-        }
-      } catch {
-        /* offline — pill keeps its last value */
-      }
-    };
-    void update();
-    this.onlineTimer = window.setInterval(update, 15000);
-  }
-
-  private stopOnlineCounter(): void {
-    if (this.onlineTimer !== null) {
-      clearInterval(this.onlineTimer);
-      this.onlineTimer = null;
-    }
-  }
-
   private drawPreview(): void {
     const cv = this.canvas("preview");
     const ctx = cv.getContext("2d")!;
@@ -502,26 +737,64 @@ export class UI {
     const n = colors.length;
     const t = this.previewTime;
 
-    // Layout: head on the right, chain scaled to fit the stage.
-    const cy = h / 2 + 4;
-    const spacing = 34;
-    const blockSize = 30;
-    const headSize = 38;
+    // Ambient food motes drifting behind the chain — sells "live arena".
+    ctx.save();
+    for (let i = 0; i < 14; i++) {
+      const fx = ((i * 173.3 + t * 22 * (1 + (i % 3) * 0.3)) % (w + 40)) - 20;
+      const fy = (i * 97.7) % h;
+      const pulse = 0.7 + 0.3 * Math.sin(t * 2.2 + i * 1.7);
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = baseColor((i * 5 + 1) % 12);
+      const s = (3.2 + (i % 3)) * pulse;
+      ctx.beginPath();
+      ctx.roundRect(fx - s / 2, fy - s / 2, s, s, 1.5);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // Layout: head on the right, chain scaled to fit the taller stage.
+    const cy = h / 2 + 6;
+    const spacing = 40;
+    const blockSize = 34;
+    const headSize = 44;
     const totalW = (n - 1) * spacing + headSize;
-    const fit = totalW > w - 48 ? (w - 48) / totalW : 1;
+    const fit = totalW > w - 56 ? (w - 56) / totalW : 1;
     const sp = spacing * fit;
-    const bs = Math.max(14, blockSize * fit);
-    const hs = Math.max(18, headSize * fit);
-    const headX = Math.max(28 + hs / 2, (w - 40) / 2 + ((n - 1) * sp) / 2);
+    const bs = Math.max(16, blockSize * fit);
+    const hs = Math.max(20, headSize * fit);
+    const headX = Math.max(32 + hs / 2, (w - 48) / 2 + ((n - 1) * sp) / 2);
+
+    // Selected-link marker: soft ring under the link being edited.
+    const selPos = (linkIdx: number | null): { x: number; y: number } | null => {
+      if (linkIdx === null || linkIdx >= n) return null;
+      const k = n - 1 - linkIdx;
+      return {
+        x: headX - k * sp,
+        y: cy + Math.sin(t * 3.4 - k * 0.55) * 13 + Math.sin(t * 0.8) * 4,
+      };
+    };
 
     // Center positions, tail (i = n-1) → head (i = 0), traveling wave.
     const posOf = (linkIdx: number): { x: number; y: number } => {
       const k = n - 1 - linkIdx; // distance behind head
       return {
         x: headX - k * sp,
-        y: cy + Math.sin(t * 3.4 - k * 0.55) * 12 + Math.sin(t * 0.8) * 4,
+        y: cy + Math.sin(t * 3.4 - k * 0.55) * 13 + Math.sin(t * 0.8) * 4,
       };
     };
+
+    const sel = selPos(this.selectedLink);
+    if (sel) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(0, 229, 255, 0.8)";
+      ctx.lineWidth = 2.5;
+      ctx.setLineDash([5, 4]);
+      ctx.lineDashOffset = -t * 18;
+      ctx.beginPath();
+      ctx.arc(sel.x, sel.y, Math.max(bs, hs) * 0.78, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Connective spine behind the blocks — reads as one continuous chain.
     if (n > 1) {
@@ -532,14 +805,14 @@ export class UI {
         const p = posOf(i);
         ctx.lineTo(p.x, p.y);
       }
-      ctx.strokeStyle = "rgba(16,19,31,0.9)";
-      ctx.lineWidth = bs * 0.5;
+      ctx.strokeStyle = "rgba(10,13,26,0.9)";
+      ctx.lineWidth = bs * 0.55;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       ctx.stroke();
     }
 
-    // Body blocks, tail → head.
+    // Body blocks, tail → head. Rounder squircle faces.
     for (let i = n - 1; i >= 1; i--) {
       const p = posOf(i);
       const col = baseColor(colors[i]!);
@@ -550,23 +823,30 @@ export class UI {
       const my = (p.y + pn.y) / 2;
       ctx.fillStyle = "#FFF8E7";
       ctx.beginPath();
-      ctx.arc(mx, my, Math.max(2.5, bs * 0.14), 0, Math.PI * 2);
+      ctx.arc(mx, my, Math.max(2.5, bs * 0.13), 0, Math.PI * 2);
       ctx.fill();
       ctx.strokeStyle = INK;
       ctx.lineWidth = 1.5;
       ctx.stroke();
 
       ctx.translate(p.x, p.y);
-      ctx.rotate(Math.sin(t * 3.4 - (n - 1 - i) * 0.55 + 0.6) * 0.08);
+      ctx.rotate(Math.sin(t * 3.4 - (n - 1 - i) * 0.55 + 0.6) * 0.07);
       ctx.fillStyle = col;
       ctx.beginPath();
-      ctx.roundRect(-bs / 2, -bs / 2, bs, bs, 7);
+      ctx.roundRect(-bs / 2, -bs / 2, bs, bs, bs * 0.3);
       ctx.fill();
       ctx.strokeStyle = INK;
       ctx.lineWidth = 3;
       ctx.stroke();
-      ctx.fillStyle = shade(col, 0.35);
-      ctx.fillRect(-bs / 2 + 3, -bs / 2 + 3, bs - 6, Math.max(3, bs * 0.16));
+      // top light + bottom shade for the premium lit-face look
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      ctx.beginPath();
+      ctx.roundRect(-bs / 2 + 4, -bs / 2 + 3.5, bs - 8, Math.max(3, bs * 0.16), 3);
+      ctx.fill();
+      ctx.fillStyle = "rgba(0,0,0,0.26)";
+      ctx.beginPath();
+      ctx.roundRect(-bs / 2 + 4, bs / 2 - 3.5 - Math.max(3, bs * 0.14), bs - 8, Math.max(3, bs * 0.14), 3);
+      ctx.fill();
       ctx.restore();
     }
 
@@ -575,17 +855,19 @@ export class UI {
     const headCol = baseColor(colors[0]!);
     ctx.save();
     ctx.shadowColor = headCol;
-    ctx.shadowBlur = 20;
+    ctx.shadowBlur = 24;
     ctx.fillStyle = headCol;
     ctx.beginPath();
-    ctx.roundRect(hp.x - hs / 2, hp.y - hs / 2, hs, hs, 10);
+    ctx.roundRect(hp.x - hs / 2, hp.y - hs / 2, hs, hs, hs * 0.28);
     ctx.fill();
     ctx.shadowBlur = 0;
     ctx.strokeStyle = INK;
     ctx.lineWidth = 3.5;
     ctx.stroke();
-    ctx.fillStyle = shade(headCol, 0.35);
-    ctx.fillRect(hp.x - hs / 2 + 4, hp.y - hs / 2 + 4, hs - 8, Math.max(3, hs * 0.14));
+    ctx.fillStyle = "rgba(255,255,255,0.42)";
+    ctx.beginPath();
+    ctx.roundRect(hp.x - hs / 2 + 5, hp.y - hs / 2 + 4.5, hs - 10, Math.max(3, hs * 0.13), 3);
+    ctx.fill();
 
     // Googly eyes tracking the pointer, with a periodic blink.
     const blink = t % 3.1 < 0.09 ? 0.15 : 1;
@@ -647,9 +929,8 @@ export class UI {
     ctx.restore();
   }
 
-  /** Ambient menu layer: soft glow orbs + drifting "food cube" motes in the
-      arena palette. Injected once; runs only while the menu is visible
-      (display:none pauses it) and disabled entirely under reduced motion. */
+  /** Ambient menu layer: glow orbs + a few drifting chain links.
+      Fewer, slower, dimmer than before — texture, not confetti. */
   private buildMenuBackdrop(): void {
     const host = document.querySelector(".menu-backdrop");
     if (!host || host.childElementCount > 0) return;
@@ -658,7 +939,7 @@ export class UI {
     if (reduced) return;
 
     // 3 blurred color orbs for depth
-    const orbColors = ["#00C2D1", "#FF5CA8", "#B6F50E"];
+    const orbColors = ["#00E5FF", "#FF5CA8", "#B6F50E"];
     orbColors.forEach((col, i) => {
       const orb = document.createElement("div");
       orb.className = "bd-orb";
@@ -669,25 +950,25 @@ export class UI {
       host.appendChild(orb);
     });
 
-    // Drifting food cubes (arena palette, ink borders)
-    const cubeColors = ["#FFD93D", "#FF5722", "#00C2D1", "#A8E10C", "#FF5CA8", "#7C5CFF"];
-    const CUBE_COUNT = 14;
+    // Drifting chain links (arena palette) — sparse + varied depth
+    const cubeColors = ["#B6F50E", "#00E5FF", "#FF5CA8", "#FFD93D", "#7C5CFF", "#FF5722"];
+    const CUBE_COUNT = 10;
     for (let i = 0; i < CUBE_COUNT; i++) {
       const c = document.createElement("div");
       c.className = "bd-cube";
-      const size = 10 + Math.random() * 22;
+      const size = 12 + Math.random() * 20;
       c.style.width = `${size}px`;
       c.style.height = `${size}px`;
       c.style.background = cubeColors[i % cubeColors.length]!;
-      c.style.left = `${Math.random() * 96}%`;
-      c.style.top = `${Math.random() * 92}%`;
-      c.style.setProperty("--dur", `${9 + Math.random() * 9}s`);
-      c.style.setProperty("--delay", `${-Math.random() * 12}s`);
-      c.style.setProperty("--dx", `${(Math.random() - 0.5) * 90}px`);
-      c.style.setProperty("--dy", `${-30 - Math.random() * 60}px`);
+      c.style.left = `${Math.random() * 94}%`;
+      c.style.top = `${Math.random() * 90}%`;
+      c.style.setProperty("--dur", `${11 + Math.random() * 10}s`);
+      c.style.setProperty("--delay", `${-Math.random() * 14}s`);
+      c.style.setProperty("--dx", `${(Math.random() - 0.5) * 70}px`);
+      c.style.setProperty("--dy", `${-24 - Math.random() * 50}px`);
       c.style.setProperty("--rot", Math.random() < 0.5 ? "-360deg" : "360deg");
-      c.style.setProperty("--spin", `${14 + Math.random() * 18}s`);
-      if (i % 3 === 0) c.style.filter = "blur(1.2px)"; // depth variety
+      c.style.setProperty("--spin", `${16 + Math.random() * 20}s`);
+      if (i % 3 === 0) c.style.filter = "blur(1.4px)"; // depth variety
       host.appendChild(c);
     }
   }
@@ -738,14 +1019,17 @@ export class UI {
     this.el("joining").classList.add("hidden");
     this.el("death").classList.add("hidden");
     this.el("connLost").classList.add("hidden");
+    // Lobby always lands on clean home (never strands on the studio page).
+    document.getElementById("forgeView")?.classList.add("hidden");
+    document.getElementById("homeView")?.classList.remove("hidden");
+    this.gatePending = false;
+    this.hideLandscapeGate();
     this.startPreviewAnimation();
-    this.startOnlineCounter(); // idempotent — guard prevents duplicates
-    this.renderMenuStats();
+    this.syncSnakeCard();
   }
 
   hideMenu(): void {
     this.el("menu").classList.add("hidden");
-    this.stopOnlineCounter();
   }
 
   showJoining(note: string): void {
@@ -761,35 +1045,48 @@ export class UI {
     this.el("hud").classList.remove("hidden");
   }
 
-  /** Mode picker: CLASSIC (constant map) vs COLLAPSE (BR rounds). Persisted
+  /** Mode picker: CLASSIC vs COLLAPSE battle-map cards. Persisted
       and sent with every join so respawn stays in the same arena. */
   private renderModeRow(): void {
     const host = document.getElementById("modeRow");
     if (!host || host.dataset.built === "1") return;
     host.dataset.built = "1";
-    const modes: Array<["classic" | "br", string, string]> = [
-      ["classic", "CLASSIC", "Constant slither-io style map"],
-      ["br", "COLLAPSE", "Battle-royale shrinking wall rounds"],
+    const modes: Array<["classic" | "br", string, string, string]> = [
+      ["classic", "🗺️", "CLASSIC", "Endless map · pure slither warfare"],
+      ["br", "🌀", "COLLAPSE", "Shrinking wall · last chain wins"],
     ];
-    for (const [val, label, title] of modes) {
+    for (const [val, ico, label, desc] of modes) {
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "pat-pill" + (this.prefs.mode === val ? " active" : "");
-      b.title = title;
-      const dot = document.createElement("span");
-      dot.textContent = val === "br" ? "🌀" : "🗺️";
-      b.appendChild(dot);
-      const span = document.createElement("span");
-      span.textContent = label;
-      b.appendChild(span);
+      b.className = "mode-card" + (this.prefs.mode === val ? " active" : "");
+      b.title = desc;
+      b.setAttribute("role", "radio");
+      b.setAttribute("aria-checked", this.prefs.mode === val ? "true" : "false");
+      const icon = document.createElement("span");
+      icon.className = "mode-ico";
+      icon.textContent = ico;
+      const txt = document.createElement("span");
+      txt.className = "mode-txt";
+      const nm = document.createElement("span");
+      nm.className = "mode-name";
+      nm.textContent = label;
+      const ds = document.createElement("span");
+      ds.className = "mode-desc";
+      ds.textContent = desc;
+      txt.append(nm, ds);
+      b.append(icon, txt);
       b.addEventListener("click", () => {
         if (this.prefs.mode !== val) {
           this.prefs.mode = val;
           this.savePrefs();
           audio.playTick(600);
         }
-        host.querySelectorAll(".pat-pill").forEach((x) => x.classList.remove("active"));
+        host.querySelectorAll(".mode-card").forEach((x) => {
+          x.classList.remove("active");
+          x.setAttribute("aria-checked", "false");
+        });
         b.classList.add("active");
+        b.setAttribute("aria-checked", "true");
       });
       host.appendChild(b);
     }
@@ -917,14 +1214,12 @@ export class UI {
     this.lastLbRef = rows;
     this.lastLbMyId = myId;
     const top3 = rows.slice(0, 3);
-    const medals = ["🥇", "🥈", "🥉"];
     let html = "";
     for (let i = 0; i < top3.length; i++) {
       const [id, name, len, , colorIdx] = top3[i]!;
       const you = id === myId ? " you" : "";
       html += `
         <div class="board-row${you}">
-          <span class="rn">${medals[i] ?? `#${i + 1}`}</span>
           <span class="dot" style="background:${baseColor(colorIdx ?? 0)}"></span>
           <span class="nm">${escapeHtml(name)}</span>
           <span class="ln">${Math.round(len)}</span>
@@ -984,21 +1279,22 @@ export class UI {
     const cy = h / 2;
     const radarR = w / 2 - 4;
 
-    // Neo-Brutalism Cream radar with dark ink ring
+    // Translucent glass: faint dark tint keeps dots readable while the LIVE
+    // arena shows through — you can spot snakes approaching from this angle.
     ctx.save();
-    ctx.fillStyle = CREAM;
+    ctx.fillStyle = "rgba(5, 10, 22, 0.32)";
     ctx.beginPath();
     ctx.arc(cx, cy, radarR, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.strokeStyle = INK;
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(255, 248, 231, 0.28)";
+    ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.arc(cx, cy, radarR, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Radar crosshairs
-    ctx.strokeStyle = "rgba(20, 20, 20, 0.15)";
+    // Faint crosshairs
+    ctx.strokeStyle = "rgba(255, 248, 231, 0.10)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(cx, 4);
@@ -1011,30 +1307,29 @@ export class UI {
     const mapX = (wx: number) => cx + wx * radScale;
     const mapY = (wy: number) => cy + wy * radScale;
 
-    // Other snakes (square pips)
+    // Other snakes (square pips — colored core, thin dark edge for contrast)
     for (const pl of state.players.values()) {
       if (pl.id === state.myId) continue;
       const x = mapX(pl.x);
       const y = mapY(pl.y);
       const col = baseColor(pl.colorIdx);
-      ctx.fillStyle = INK;
-      ctx.fillRect(x - 2.5, y - 2.5, 6, 6);
       ctx.fillStyle = col;
-      ctx.fillRect(x - 3, y - 3, 5, 5);
+      ctx.fillRect(x - 3, y - 3, 6, 6);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.55)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - 3, y - 3, 6, 6);
     }
 
-    // Player self marker (High-contrast bright yellow/gold square pip with outline)
+    // Player self marker (bright gold square pip with outline)
     const me = state.getSelf();
     if (me) {
       const mx = mapX(me.x);
       const my = mapY(me.y);
-      ctx.fillStyle = INK;
-      ctx.fillRect(mx - 5, my - 5, 12, 12);
       ctx.fillStyle = "#FFD93D";
-      ctx.fillRect(mx - 4, my - 4, 10, 10);
-      ctx.strokeStyle = INK;
+      ctx.fillRect(mx - 4, my - 4, 9, 9);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
       ctx.lineWidth = 1.5;
-      ctx.strokeRect(mx - 4, my - 4, 10, 10);
+      ctx.strokeRect(mx - 4, my - 4, 9, 9);
     }
     ctx.restore();
   }

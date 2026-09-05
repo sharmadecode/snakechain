@@ -296,3 +296,50 @@ never stitched. Net result: smoothest known configuration across all snakes.
 ## Verification
 `tsc --noEmit` exit 0 both sides · own instance restarted · simultaneous dual-mode
 join smoke test passed (classic id=41 / br id=42) · /health per-arena detail live
+
+---
+
+# ANDROID PARITY PASS (native Kotlin app brought level with the web build)
+
+The `android/` native app now matches the mobile-browser experience feature-for-feature:
+
+- **Chain physics**: follow-the-leader simulation ported 1:1 (ring-snap pass, organic
+  growth extending out of the tail, count management) — Android bodies now match
+  server truth instead of rendering old trail-model shapes.
+- **Modes**: CLASSIC / COLLAPSE picker in the menu; `mo` sent on every join;
+  respawns stay in the same arena.
+- **Spectate death-cam**: parses `killerId`, camera glides to the killer, and a
+  `view{tg}` message keeps server interest centered on them (no more vanishing).
+- **Boost glow**: additive per-block bloom in each block's own chain color + head
+  bloom (pre-rendered bitmaps, PorterDuff ADD — paid only while boosting). Self is
+  exact input; remotes infer via velocity hysteresis (band 215–255).
+- **Skin patterns rendered**: fade / stripes / spots / bands / ink accents drawn
+  procedurally per block (mirrors web sprite variants).
+- **Golden pellets**: parsed (index 5), drawn ×1.35 amber cube + pulsing halo +
+  orbiting glints.
+- **Spawn shield**: slot-9 flag parsed (was misread as "boost"!) → pulsing cream
+  head shimmer. Spark-trail bug fixed as a side effect.
+- **HUD redesign parity**: transparent minimap w/ live arena showing through,
+  borderless dark-glass top-3 leaderboard (names only, no RANK header/medals),
+  ✕ back-to-lobby button beside it, translucent joystick ring, thumb-sized boost
+  button (64dp orange/red), ping pill, champion banner.
+- **Personal bests**: SharedPreferences progression (bestLen/mostKills/games) with
+  menu strip + death-screen PB banner + "Max Length · PB n" stat.
+- **Camera smoothing fix**: camera was snapping to raw row targets every tick
+  (the Android "laggy/jittery" feel) — now exponentially follows the smoothed
+  self position (or spectate target) with teleport snap at >3000u.
+
+**Build verified**: `gradlew :app:compileDebugKotlin` + `:app:assembleDebug` both
+BUILD SUCCESSFUL (requires JDK 21 via `-Dorg.gradle.java.home=<Android Studio jbr>`
+on this machine — system default JDK 25 breaks the bundled Kotlin compiler's
+version parser). Fresh APK: android/app/build/outputs/apk/debug/app-debug.apk.
+
+## ANDROID AUDIT PASS (post-parity recheck)
+- Camera zoom floor aligned to web (0.62, was 0.60) — identical zoom feel.
+- Double safe-inset removed from top-right HUD row (root HUD already applies
+  safeDrawing insets — content double-offset toward screen center on notches).
+- Champion banner dropped below killfeed max height (top 96dp) — no overlap.
+- Verified sound: chain sim parity, boost-glow bitmaps (ADD blend), shield
+  shimmer paint-state resets, magnetism culling margin, TTL sweep with new
+  iteration shape, no stale `.boost` references, prefs positional order.
+- Fresh APK rebuilt after fixes: app-debug.apk (Aug 25 21:13).
